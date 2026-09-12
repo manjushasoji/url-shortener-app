@@ -1,0 +1,71 @@
+package com.urlshortener.controller;
+
+import com.urlshortener.dto.CreateShortUrlRequest;
+import com.urlshortener.dto.ShortUrlResponse;
+import com.urlshortener.service.UrlShortenerService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.view.RedirectView;
+
+@RestController
+@RequestMapping("/api/v1")
+@Tag(name = "URL Shortener", description = "Create and resolve short URLs")
+public class UrlShortenerController {
+
+    private final UrlShortenerService urlShortenerService;
+
+    public UrlShortenerController(UrlShortenerService urlShortenerService) {
+        this.urlShortenerService = urlShortenerService;
+    }
+
+    @Operation(summary = "Create a short URL", description = "Creates a shortened URL for a valid absolute URL.")
+    @ApiResponses(value = {
+        @ApiResponse(responseCode = "201", description = "Short URL created successfully"),
+        @ApiResponse(responseCode = "400", description = "Invalid URL or payload"),
+        @ApiResponse(responseCode = "409", description = "Short code already exists")
+    })
+    @PostMapping("/urls")
+    public ResponseEntity<ShortUrlResponse> createShortUrl(@Valid @RequestBody CreateShortUrlRequest request) {
+        ShortUrlResponse response = urlShortenerService.createShortUrl(request);
+        return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    }
+
+    @Operation(summary = "Get short URL metadata", description = "Fetches details of a shortened URL by its code.")
+    @ApiResponses(value = {
+        @ApiResponse(responseCode = "200", description = "Short URL found"),
+        @ApiResponse(responseCode = "404", description = "Short URL not found")
+    })
+    @GetMapping("/urls/{shortCode}")
+    public ResponseEntity<ShortUrlResponse> getShortUrl(
+        @Parameter(description = "Short code generated for the original URL", example = "abc12345")
+        @PathVariable String shortCode) {
+        return ResponseEntity.ok(urlShortenerService.getShortUrlByCode(shortCode));
+    }
+
+    @Operation(summary = "Redirect to original URL", description = "Redirects users to the original URL using the short code.")
+    @ApiResponses(value = {
+        @ApiResponse(responseCode = "301", description = "Redirected successfully"),
+        @ApiResponse(responseCode = "404", description = "Short URL not found")
+    })
+    @GetMapping("/{shortCode}")
+    public RedirectView redirect(
+        @Parameter(description = "Short code generated for the original URL", example = "abc12345")
+        @PathVariable String shortCode) {
+        String originalUrl = urlShortenerService.redirectToOriginalUrl(shortCode);
+        RedirectView redirectView = new RedirectView(originalUrl);
+        redirectView.setStatusCode(HttpStatus.MOVED_PERMANENTLY);
+        return redirectView;
+    }
+}
