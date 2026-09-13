@@ -20,6 +20,7 @@ A REST service for creating, resolving, and redirecting shortened URLs, built wi
 | Reliability: async click recording (doesn't block/fail the redirect) | ✅ Implemented |
 | Reliability: caching | ❌ Not implemented |
 | Update a short URL's `active`/`expiresAt` (`PATCH /api/v1/urls/{shortCode}`) | ✅ Implemented |
+| Consistent JSON `ApiError` for unmapped paths (instead of the whitelabel page) | ✅ Implemented |
 | List / delete a short URL | ❌ Not implemented |
 | Authentication / ownership of links | ❌ Not implemented |
 | CI: build + test on every push/PR to `main` | ✅ Implemented |
@@ -81,6 +82,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 
 All `/api/v1/**` endpoints are also rate-limited per client IP (default: 30 requests/minute); an excess request gets `429 Too Many Requests` with the standard `ApiError` body.
 
+Any path that doesn't match a route at all — a typo, a made-up endpoint, anywhere in the app, not just under `/api/v1` — returns the same `ApiError` JSON shape (via `ApiErrorController`, replacing Spring Boot's default whitelabel/JSON error page) instead of an inconsistent response format.
+
 ## Testing
 
 Run the test suite with:
@@ -102,8 +105,9 @@ Current coverage (`src/test/java`):
 - `UrlShortenerServiceImplTest` / `UrlShortenerControllerTest` — the new `PATCH` endpoint: deactivate, update `expiresAt`, update both, leaving an unspecified field unchanged, rejecting an empty update, `404` for a missing code, and `400` for a past `expiresAt` (exercised end-to-end through real Bean Validation via MockMvc)
 - `FixedWindowRateLimiterTest` / `RateLimitFilterTest` — window limit/reset behavior (via an injectable `Clock`, not real sleeps) and the filter's pass-through/`429` responses per client IP
 - `ClickAnalyticsRecorderTest` — verifies what gets saved (parsed browser name, referrer); run directly rather than through Spring, so it exercises the business logic, not the actual async dispatch (see Not yet covered)
+- `ApiErrorControllerTest` — verifies the `/error` fallback maps Spring's error attributes (status, path, message) into the same `ApiError` shape as every other endpoint, including sensible defaults when an attribute is missing
 
-**Not yet covered:** an actual concurrent-load test hitting a real MySQL instance to prove the retry-on-collision path under real contention (the race is unit-tested by simulating the exception, not reproduced with real concurrent threads/connections), the daily-breakdown JPQL query against a real MySQL instance (verified logically, not with an integration test against a live database), that `@Async` actually dispatches `recordClick` onto a different thread in a running Spring context (a `@SpringBootTest` with real thread-pool timing would be needed; skipped here as disproportionate for a prototype), load/performance testing.
+**Not yet covered:** an actual concurrent-load test hitting a real MySQL instance to prove the retry-on-collision path under real contention (the race is unit-tested by simulating the exception, not reproduced with real concurrent threads/connections), the daily-breakdown JPQL query against a real MySQL instance (verified logically, not with an integration test against a live database), that `@Async` actually dispatches `recordClick` onto a different thread in a running Spring context (a `@SpringBootTest` with real thread-pool timing would be needed; skipped here as disproportionate for a prototype), that a real request to a genuinely unmapped path actually reaches `ApiErrorController` through the full servlet container `/error` forwarding pipeline (`ApiErrorControllerTest` calls the controller method directly with attributes it constructs itself, not through a live `DispatcherServlet`), load/performance testing.
 
 ## Continuous Integration
 
@@ -129,6 +133,7 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 - **No list or delete endpoints** — `active`/`expiresAt` can be updated (including deactivating a link), but there's still no way to enumerate all short URLs or permanently remove one.
 - **No auth/ownership model** — any client can create/read any short URL.
 - **CI covers build + test only** — no static analysis/linting or dependency-CVE scanning beyond Dependabot's alerts is wired in yet (see Continuous Integration above).
+- **`ApiErrorController`'s `message` field comes from Spring Boot's own error attributes, not a message this project writes** — for an unmapped path it's typically something like "No static resource api/v1/does-not-exist." rather than a purpose-written string; the `status`/`path`/JSON shape are consistent with every other error response, but don't expect a tailored message for this particular case.
 
 ## Project Status
 
