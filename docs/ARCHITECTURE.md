@@ -177,7 +177,7 @@ Cross-cutting:
 
 ## 6. Execution Approach
 
-The initial implementation proceeded layer-by-layer (entity → repository → service → controller → exception handling → tests). Everything since has shipped as one focused PR per task — one concern per branch, its own commit message stating intent and rationale, docs updated in the same PR as the code they describe. See [docs/SCENARIOS.md](SCENARIOS.md) for the task decomposition and AI-assistance trail behind specific examples of that process, with links to the actual merged PRs.
+The initial implementation proceeded layer-by-layer (entity → repository → service → controller → exception handling → tests). Everything since has shipped as one focused PR per task — one concern per branch, its own commit message stating intent and rationale, docs updated in the same PR as the code they describe. See [docs/SCENARIOS.md](SCENARIOS.md) for the task decomposition and AI-assistance trail behind specific examples of that process, with links to the actual merged PRs, and [docs/AI-TRACEABILITY.md](AI-TRACEABILITY.md) specifically for the moments engineer review changed the outcome — a bug caught by real testing, an output redirected after review, a scope decision the AI couldn't make alone.
 
 ## 7. What This Architecture Does Not Yet Address
 
