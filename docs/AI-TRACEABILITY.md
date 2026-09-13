@@ -1,6 +1,6 @@
 # AI Traceability & Human Oversight Log
 
-The assignment's Core Requirement #4 (AI-Assisted Execution) asks for "traceability (generated/edited/rejected with rationale)... human sign-off for high-impact changes... explicit engineer ownership of correctness." Requirement #7 (Controlled Oversight) asks that "Engineer leads execution and approves all outputs; AI assists within tasks." This document is that trail — every entry below is a real moment from this project's actual session history where the engineer reviewed AI-generated output and either caught a defect, redirected an approach, made a scope decision the AI couldn't make alone, or where the AI itself declined to proceed without human verification. Nothing here is reconstructed after the fact; every entry links to the commit/PR where it happened.
+The assignment's Core Requirement #4 (AI-Assisted Execution) asks for "traceability (generated/edited/rejected with rationale)... human sign-off for high-impact changes... explicit engineer ownership of correctness." Requirement #7 (Controlled Oversight) asks that "Engineer leads execution and approves all outputs; AI assists within tasks." This document is that trail — every entry below is a real moment from this project's actual session history where the engineer reviewed AI-generated output and either caught a defect, redirected an approach, or made a scope decision the AI couldn't make alone. Nothing here is reconstructed after the fact; every entry links to the commit/PR where it happened.
 
 This is not a list of "AI wrote code, human clicked merge." It's specifically the moments where review changed the outcome.
 
@@ -18,7 +18,6 @@ This is not a list of "AI wrote code, human clicked merge." It's specifically th
 | 8 | A literal, ambiguous request ("4XX error for wrong url") | Asked which of 3 readings was meant before writing code | Implementation matched the selected reading, not a guess |
 | 9 | A request to "add security" with unspecified shape | Directed specific architecture: split the redirect endpoint out, admin-only elsewhere | Built exactly that shape, not an AI-chosen alternative |
 | 10 | Engineer's own `mvnw` wrapper files, committed directly | AI reviewed them before building on top, found a real bug (missing executable bit) | Fixed and wired into CI/docs, credited as the engineer's addition |
-| 11 | A Dependabot PR proposing Spring Boot 3 → 4 | AI asked whether to proceed | AI recommended against merging blind, given no local way to verify a major-version upgrade |
 
 ## Detail
 
@@ -89,14 +88,6 @@ This specified the shape of the solution directly (which endpoint stays public, 
 **AI-reviewed:** Before building anything on top, checked `git ls-files -s mvnw` and found it committed as mode `100644` — not executable — which would fail with "Permission denied" running `./mvnw` on Linux/macOS, including this project's own GitHub Actions runner. This wasn't a hypothetical: it's the kind of bug that only surfaces at the exact moment someone tries to run the script.
 
 **Correction:** Fixed the executable bit via `git update-index --chmod=+x`, and wired `ci.yml`/README to actually use the wrapper (previously it existed but nothing invoked it, including CI). [build/add-maven-wrapper (PR #22)](https://github.com/manjushasoji/url-shortener-app/pull/22). Oversight in this project ran in both directions — this is the one instance where the AI caught a defect in engineer-authored input rather than the other way around.
-
-### 11. A recommendation to *not* act, pending human verification
-
-**Situation:** Dependabot opened a PR bumping `spring-boot-starter-parent` from `3.4.1` to `4.1.1` — a major version jump (Spring Boot 4 / Spring Framework 7), likely carrying breaking changes.
-
-**AI's position when asked:** Recommended against merging without local verification — this session has no Java/Maven toolchain to compile or run the app, and the project had already been burned twice by version-mismatch issues that only surfaced when actually run (items 5–6 above; the Spring 6.1 behavior change in items 3–4). A major framework bump has far more breaking-change surface area than either of those.
-
-**Why this belongs here:** it's the assignment's "human sign-off for high-impact changes" principle from the AI's side — declining to implicitly endorse a change it has no way to verify, rather than producing a confident-sounding review of something it can't actually check.
 
 ## What This Log Doesn't Cover
 
