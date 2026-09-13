@@ -4,7 +4,6 @@ import com.urlshortener.dto.ClickStatsResponse;
 import com.urlshortener.dto.CreateShortUrlRequest;
 import com.urlshortener.dto.DailyClickCount;
 import com.urlshortener.dto.ShortUrlResponse;
-import com.urlshortener.entity.ClickAnalytics;
 import com.urlshortener.entity.ShortUrl;
 import com.urlshortener.exception.DuplicateShortCodeException;
 import com.urlshortener.exception.ResourceNotFoundException;
@@ -12,7 +11,6 @@ import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.repository.ClickAnalyticsRepository;
 import com.urlshortener.repository.ShortUrlRepository;
 import com.urlshortener.util.UrlValidator;
-import com.urlshortener.util.UserAgentParser;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -30,11 +28,16 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
     private static final int MAX_GENERATION_ATTEMPTS = 5;
     private final ShortUrlRepository shortUrlRepository;
     private final ClickAnalyticsRepository clickAnalyticsRepository;
+    private final ClickAnalyticsRecorder clickAnalyticsRecorder;
     private final SecureRandom random = new SecureRandom();
 
-    public UrlShortenerServiceImpl(ShortUrlRepository shortUrlRepository, ClickAnalyticsRepository clickAnalyticsRepository) {
+    public UrlShortenerServiceImpl(
+        ShortUrlRepository shortUrlRepository,
+        ClickAnalyticsRepository clickAnalyticsRepository,
+        ClickAnalyticsRecorder clickAnalyticsRecorder) {
         this.shortUrlRepository = shortUrlRepository;
         this.clickAnalyticsRepository = clickAnalyticsRepository;
+        this.clickAnalyticsRecorder = clickAnalyticsRecorder;
     }
 
     @Override
@@ -114,7 +117,7 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
 
         entity.setClickCount((entity.getClickCount() == null ? 0L : entity.getClickCount()) + 1L);
         shortUrlRepository.save(entity);
-        clickAnalyticsRepository.save(new ClickAnalytics(entity.getId(), referrer, UserAgentParser.extractBrowserName(userAgent)));
+        clickAnalyticsRecorder.recordClick(entity.getId(), referrer, userAgent);
 
         return entity.getOriginalUrl();
     }

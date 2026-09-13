@@ -17,7 +17,8 @@ A REST service for creating, resolving, and redirecting shortened URLs, built wi
 | Analytics: "top links" listing across all URLs | ❌ Not implemented yet |
 | Health checks (Spring Boot Actuator: `/actuator/health`, `/actuator/info`) | ✅ Implemented |
 | Reliability: per-IP rate limiting on `/api/v1/**` | ✅ Implemented |
-| Reliability: caching, async click recording | ❌ Not implemented |
+| Reliability: async click recording (doesn't block/fail the redirect) | ✅ Implemented |
+| Reliability: caching | ❌ Not implemented |
 | List / update / delete / deactivate a short URL | ❌ Not implemented |
 | Authentication / ownership of links | ❌ Not implemented |
 
@@ -90,8 +91,9 @@ Current coverage (`src/test/java`):
 - `ShortUrlRepositoryTest` / `ClickAnalyticsRepositoryTest` — persistence layer contracts
 - `GlobalExceptionHandlerTest` — error response shape per exception type, including the new `410` expired-link mapping
 - `FixedWindowRateLimiterTest` / `RateLimitFilterTest` — window limit/reset behavior (via an injectable `Clock`, not real sleeps) and the filter's pass-through/`429` responses per client IP
+- `ClickAnalyticsRecorderTest` — verifies what gets saved (parsed browser name, referrer); run directly rather than through Spring, so it exercises the business logic, not the actual async dispatch (see Not yet covered)
 
-**Not yet covered:** an actual concurrent-load test hitting a real MySQL instance to prove the retry-on-collision path under real contention (the race is unit-tested by simulating the exception, not reproduced with real concurrent threads/connections), the daily-breakdown JPQL query against a real MySQL instance (verified logically, not with an integration test against a live database), load/performance testing.
+**Not yet covered:** an actual concurrent-load test hitting a real MySQL instance to prove the retry-on-collision path under real contention (the race is unit-tested by simulating the exception, not reproduced with real concurrent threads/connections), the daily-breakdown JPQL query against a real MySQL instance (verified logically, not with an integration test against a live database), that `@Async` actually dispatches `recordClick` onto a different thread in a running Spring context (a `@SpringBootTest` with real thread-pool timing would be needed; skipped here as disproportionate for a prototype), load/performance testing.
 
 ## Known Limitations
 
@@ -100,13 +102,13 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 - **Hardcoded DB credentials** committed in `application.properties` — should move to environment variables/secrets before any shared or production use.
 - **`/actuator/health` shows full dependency details with no authentication** (`management.endpoint.health.show-details=always`) — acceptable for local/prototype use, but should be restricted (e.g. `when-authorized`, or gated behind network/auth controls) before any shared deployment, since it can reveal internal DB connectivity details to any caller.
 - **Short-code generation retries a fixed number of times (5) on collision, not indefinitely** — with an 8-character, 62-character-alphabet code space, collision odds are astronomically low, so this is a safety net rather than an expected path; if it's ever exhausted, `createShortUrl` fails with a clear `409` rather than looping forever.
-- **Click recording is synchronous** — each redirect writes a `click_analytics` row in the same request/transaction as the redirect itself, adding a write to the hot path. Planned fix: move this to an async write once the reliability work lands, so analytics recording can't slow down or fail a redirect.
+- **Async click recording has no delivery guarantee** — `ClickAnalyticsRecorder.recordClick` runs on a bounded background thread pool (`@Async`, core 2 / max 8 / queue 500); if the DB write fails, it's only logged (`AsyncConfig`'s uncaught-exception handler), not retried, and the click is silently dropped from analytics. If the queue fills up under sustained load, further async submissions are rejected (default `AbortPolicy`) and would also be logged-and-dropped rather than blocking the redirect. Acceptable since analytics accuracy is explicitly secondary to redirect availability here, but worth knowing before relying on click counts being exact.
 - **No "top links" analytics view** — per-link stats (`/api/v1/urls/{shortCode}/stats`) are implemented, but there's no endpoint yet to list/sort all URLs by click volume.
 - **Daily-breakdown query untested against real MySQL** — the `CAST(... AS date)` JPQL aggregation in `ClickAnalyticsRepository` is covered by mock-based unit tests only; it hasn't been run against a live database yet.
 - **`referrer` will often be null** — it's populated from the `Referer` HTTP header, which browsers only send when navigation originates from a link on another page. Direct/typed navigation, HTTPS→HTTP downgrades, and privacy-focused browsers/extensions all omit it. This is expected client behavior, not a bug — treat `referrer` as best-effort, not guaranteed data.
 - **`user_agent` stores a parsed browser name, not the raw header** — `UserAgentParser.extractBrowserName` reduces the raw `User-Agent` string down to one of `Chrome`, `Firefox`, `Safari`, `Edge`, `Opera`, `Internet Explorer`, `Other` (unrecognized client), or `Unknown` (header missing). It uses simple substring checks in a specific order (checking Edge/Opera before Chrome, since their UA strings also contain "Chrome") rather than a full parsing library, so unusual or future browser UA formats may fall into `Other`. The raw header itself is not retained.
 - **Rate limiting is in-memory, per-instance, and keyed on `request.getRemoteAddr()`** — fine for a single instance behind no proxy, but two problems if that changes: (1) running multiple instances means each has its own independent counter, so the effective limit multiplies with instance count; (2) behind a reverse proxy/load balancer, every request's remote address is the proxy's IP, not the real client's, so all traffic would share one bucket. A shared store (Redis) plus `X-Forwarded-For` handling would fix both — out of scope for this prototype.
-- **No caching, no retry/circuit-breaker behavior.** (Actuator health/info endpoints and rate limiting are implemented — see Features.)
+- **No caching, no retry/circuit-breaker behavior.** (Actuator health/info endpoints, rate limiting, and async click recording are implemented — see Features.)
 - **No management endpoints** — no list, update, delete, or deactivate operations; a link can never be turned off once created.
 - **No auth/ownership model** — any client can create/read any short URL.
 - **No CI pipeline** — tests, linting, and security scanning are not automated.

@@ -33,31 +33,36 @@ Client
 │  - generates an 8-char random short code, or normalizes a   │
 │    caller-supplied custom code                              │
 │  - enforces short-code uniqueness before persisting          │
-│  - increments click_count and records a click_analytics      │
-│    row on redirect                                           │
+│  - increments click_count on redirect, delegates click_     │
+│    analytics recording to ClickAnalyticsRecorder (async)     │
 │  - aggregates click_analytics into per-link stats            │
 │  - maps entities <-> response DTOs                          │
 └───────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌───────────────────────────────────────────────────────────┐
-│ ShortUrlRepository / ClickAnalyticsRepository (Spring Data   │
-│ JPA)                                                         │
-│  - findByShortCode / existsByShortCode                       │
-│  - countByShortUrlId / findFirstClickAt / findLastClickAt /   │
-│    findDailyClickCounts (grouped aggregation)                │
-└───────────────────────────────────────────────────────────┘
-                          │
-                          ▼
+                    │                        │ (async, different thread)
+                    ▼                        ▼
+┌────────────────────────────┐  ┌──────────────────────────────┐
+│ ShortUrlRepository          │  │ ClickAnalyticsRecorder (@Async)│
+│  - findByShortCode /        │  │  - parses browser name         │
+│    existsByShortCode        │  │    (UserAgentParser) and saves │
+└────────────────────────────┘  │    a click_analytics row       │
+                    │            └──────────────────────────────┘
+                    │                        │
+                    ▼                        ▼
         MySQL: short_url table            click_analytics table
    (unique index on short_code,      (indexed on short_url_id and
        index on active)                       clicked_at)
+
+ClickAnalyticsRepository (Spring Data JPA) also backs the stats
+endpoint directly from UrlShortenerServiceImpl (countByShortUrlId /
+findFirstClickAt / findLastClickAt / findDailyClickCounts) — the
+async path above is only for writing new click events.
 ```
 
 Cross-cutting:
 - **`GlobalExceptionHandler`** (`@RestControllerAdvice`) — maps `ResourceNotFoundException`, `InvalidUrlException`, `DuplicateShortCodeException`, `UrlExpiredException`, validation errors, and any uncaught exception to a structured `ApiError` (timestamp, status, error, message, path).
 - **`OpenApiConfig`** — exposes Swagger UI / OpenAPI spec for interactive API exploration.
 - **`RateLimitFilter`** (registered via `RateLimitConfig` on `/api/v1/*`, ahead of Spring MVC) — a per-client-IP fixed-window limiter; returns `429` with the same `ApiError` shape when exceeded, before the request reaches the controller.
+- **`AsyncConfig`** (`@EnableAsync` + `AsyncConfigurer`) — provides the bounded thread pool `@Async` methods run on, and logs (rather than silently swallows) any exception an async method throws.
 
 ## 2. Tools
 
@@ -107,8 +112,8 @@ Cross-cutting:
 2. Service looks up the entity by short code; `404` via `ResourceNotFoundException` if absent.
 3. If `active` is `false`, also `404`s (though nothing in the current code ever flips `active` to `false`).
 4. If `expires_at` is set and is in the past, throws `UrlExpiredException` → `410 Gone`.
-5. Click count is incremented and saved, and a `click_analytics` row is written in the same transaction (short_url_id, timestamp, referrer, and the browser name parsed from the raw `User-Agent` header via `UserAgentParser`). *(This makes the write path do more work per redirect — see Known Limitations regarding making this async.)*
-6. Controller issues a `302` redirect to `original_url`. *(Deliberately not `301` — see Key Design Decisions: a 301 would let browsers cache the redirect and skip the server on repeat clicks, undercounting `click_count`/`click_analytics`.)*
+5. Click count is incremented and saved (still on the request thread — this part stays synchronous, since a lost click count would be visibly wrong on the next metadata fetch). `ClickAnalyticsRecorder.recordClick` is then called, which dispatches to a background thread pool (`@Async`) that parses the browser name (`UserAgentParser`) and writes the `click_analytics` row — the request thread does not wait for this to finish.
+6. Controller issues a `302` redirect to `original_url`, which returns as soon as step 5's synchronous part completes — it does not wait on the async analytics write. *(Deliberately not `301` — see Key Design Decisions: a 301 would let browsers cache the redirect and skip the server on repeat clicks, undercounting `click_count`/`click_analytics`.)*
 
 **Click stats (`GET /api/v1/urls/{shortCode}/stats`):**
 1. Service resolves the `ShortUrl` by code; `404` if absent.
@@ -122,7 +127,8 @@ Cross-cutting:
 - **Save-and-catch-and-retry instead of a stricter check-then-act for short-code creation**: the original implementation only checked `existsByShortCode` before saving, leaving a race window between two concurrent requests generating the same code. Rather than adding a DB-level advisory lock or `SELECT ... FOR UPDATE` (more complex, and unnecessary given how sparse the 62^8 code space is), `createShortUrl` now catches the unique-constraint violation from `save()` itself and retries with a new random code (generated codes) or fails clearly with `409` (custom codes, where retrying with a different code wouldn't honor what the caller asked for). This required removing `@Transactional` from `createShortUrl`: retrying inside one wrapping transaction would fail, because a caught persistence exception marks that transaction rollback-only in Spring/Hibernate — each `save()` attempt now runs in its own implicit transaction (Spring Data's repository methods are `@Transactional` themselves), so a failed attempt doesn't poison the next one.
 - **`ddl-auto=update` instead of a migration tool (Flyway/Liquibase)**: faster to iterate on for a prototype, but not something to carry into a shared/production environment — schema changes aren't versioned or reviewable as migrations.
 - **302 (temporary) redirect, not 301**: originally implemented as `301 Moved Permanently`, which is spec-cacheable by browsers — testing showed that a browser given a 301 once will resolve the short link from its own cache on every subsequent click, never re-hitting the server, so `click_count` and `click_analytics` silently stop incrementing for that visitor. Switched to `302 Found` so every click reaches the server and gets counted. Trade-off: the service loses the browser-caching benefit a 301 gave, and a redirect target can be changed later without stale-cache risk — both acceptable given click accuracy is the core feature.
-- **Event table (`click_analytics`) instead of only a counter**: a single `click_count` integer can't answer "clicks over time" or support a future "top links" view, so individual click events are recorded and aggregated on read. Trade-off: this is a write on every redirect (one INSERT plus the existing `click_count` UPDATE) instead of a single UPDATE — acceptable for a prototype, but the reason the README calls out making this write asynchronous as a near-term reliability follow-up.
+- **Event table (`click_analytics`) instead of only a counter**: a single `click_count` integer can't answer "clicks over time" or support a future "top links" view, so individual click events are recorded and aggregated on read. Trade-off: this is a write on every redirect (one INSERT plus the existing `click_count` UPDATE) instead of a single UPDATE — mitigated by making the INSERT asynchronous (see below).
+- **`click_analytics` write moved to a separate `@Async` bean (`ClickAnalyticsRecorder`), `click_count` update left synchronous**: the two writes have different failure tolerances — an inaccurate click *count* would be visibly wrong the next time someone fetches metadata, while a missing analytics *event* just slightly undercounts a chart nobody's looking at in real time. Splitting them lets the redirect return as soon as the tolerant part (count) is done, without waiting on the less-critical part (event). This required moving the call into a different Spring bean than `UrlShortenerServiceImpl`, because `@Async`'s proxy only intercepts calls arriving from outside the bean — calling an `@Async` method on `this` from within the same class silently runs synchronously. A failed async write is only logged (`AsyncConfig`'s exception handler), not retried — accepted as a known limitation rather than adding a retry/dead-letter mechanism disproportionate to a prototype.
 - **`short_url_id` stored as a plain indexed column, not a JPA `@ManyToOne`**: avoids loading/managing the `ShortUrl` association just to write an analytics row, keeping the redirect's hot path lighter at the cost of no referential-integrity enforcement — there's an index on `short_url_id` for query performance, but no actual foreign-key constraint or cascade behavior at either the entity or schema level.
 - **Hand-rolled `UserAgentParser` instead of a UA-parsing library**: the raw `User-Agent` header is a single string that packs multiple browser/engine tokens together for legacy compatibility (e.g. Chrome's UA also contains "Safari" and "AppleWebKit"), which is confusing to read directly in analytics. A small ordered set of substring checks (most-derived browsers like Edge/Opera checked before Chrome, since they also contain a "Chrome" token) covers the common desktop/mobile browsers without adding a dependency. Trade-off: it won't correctly classify less common or future browsers (they fall into `Other`), whereas a maintained library (e.g. `ua-parser`) would stay current with new UA formats at the cost of an added dependency.
 - **Hand-rolled `FixedWindowRateLimiter` (servlet filter) instead of a library like Bucket4j**: a fixed window per client IP, backed by a plain `ConcurrentHashMap`, is simple enough to review at a glance and needs zero new runtime dependencies — reasonable for a single-instance prototype. Trade-off vs. a token-bucket library: fixed windows allow a burst of up to 2x the limit right at a window boundary (e.g. 30 requests in the last second of one window, then another 30 in the first second of the next), where a token bucket smooths this out. A bigger limitation is that this is in-memory and per-instance — see Known Limitations in the README for what breaks if this ever runs behind a load balancer or across multiple instances.
@@ -135,9 +141,9 @@ Implementation proceeded layer-by-layer (entity → repository → service → c
 
 These are scope gaps, not implementation bugs — tracked in full in the README's Known Limitations:
 - A "top links" analytics view across all URLs (per-link stats are now implemented; cross-link aggregation is not)
-- Async click recording — analytics writes currently happen synchronously on the redirect path
-- Reliability concerns: caching, retry/circuit-breaking (health checks and rate limiting are now implemented)
+- Reliability concerns: caching, retry/circuit-breaking (health checks, rate limiting, and async click recording are now implemented)
 - Link lifecycle management: update, delete, deactivate (expiration is now implemented and enforced)
 - AuthN/AuthZ and multi-tenant ownership of links
 - `/actuator/health` detail exposure has no access control — fine for local/prototype use, not for a shared deployment
 - Rate limiting is in-memory/per-instance and keyed on the immediate TCP peer address — breaks down behind a load balancer or across multiple instances (see Known Limitations in the README)
+- Async click recording has no delivery guarantee — a failed or queue-rejected write is logged and dropped, not retried (see Known Limitations in the README)
