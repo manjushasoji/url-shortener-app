@@ -45,6 +45,9 @@ class UrlShortenerServiceImplTest {
     @Mock
     private ClickAnalyticsRecorder clickAnalyticsRecorder;
 
+    @Mock
+    private ShortUrlCache shortUrlCache;
+
     @InjectMocks
     private UrlShortenerServiceImpl urlShortenerService;
 
@@ -209,46 +212,63 @@ class UrlShortenerServiceImplTest {
 
     @Test
     void redirectToOriginalUrl_shouldReturnOriginalUrlAndIncrementClickCount() {
-        ShortUrl existing = new ShortUrl("abc12345", "https://example.com");
-        existing.setClickCount(1L);
+        CachedShortUrl cached = new CachedShortUrl(1L, "https://example.com", true, null);
         String chromeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             + "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-        when(shortUrlRepository.findByShortCode("abc12345")).thenReturn(Optional.of(existing));
-        when(shortUrlRepository.save(any(ShortUrl.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(shortUrlCache.lookupForRedirect("abc12345")).thenReturn(cached);
 
         String originalUrl = urlShortenerService.redirectToOriginalUrl("abc12345", "https://ref.example", chromeUserAgent);
 
         assertEquals("https://example.com", originalUrl);
-        assertEquals(2L, existing.getClickCount());
-        verify(clickAnalyticsRecorder).recordClick(existing.getId(), "https://ref.example", chromeUserAgent);
+        verify(shortUrlRepository).incrementClickCount(1L);
+        verify(clickAnalyticsRecorder).recordClick(1L, "https://ref.example", chromeUserAgent);
+    }
+
+    @Test
+    void redirectToOriginalUrl_shouldThrowResourceNotFound_whenLinkIsInactive() {
+        CachedShortUrl cached = new CachedShortUrl(1L, "https://example.com", false, null);
+
+        when(shortUrlCache.lookupForRedirect("abc12345")).thenReturn(cached);
+
+        assertThrows(ResourceNotFoundException.class,
+            () -> urlShortenerService.redirectToOriginalUrl("abc12345", null, null));
+
+        verify(shortUrlRepository, never()).incrementClickCount(any());
+        verify(clickAnalyticsRecorder, never()).recordClick(any(), any(), any());
     }
 
     @Test
     void redirectToOriginalUrl_shouldThrowUrlExpiredException_whenLinkHasExpired() {
-        ShortUrl expired = new ShortUrl("abc12345", "https://example.com");
-        expired.setExpiresAt(LocalDateTime.now().minusMinutes(1));
+        CachedShortUrl cached = new CachedShortUrl(1L, "https://example.com", true, LocalDateTime.now().minusMinutes(1));
 
-        when(shortUrlRepository.findByShortCode("abc12345")).thenReturn(Optional.of(expired));
+        when(shortUrlCache.lookupForRedirect("abc12345")).thenReturn(cached);
 
         assertThrows(UrlExpiredException.class,
             () -> urlShortenerService.redirectToOriginalUrl("abc12345", null, null));
 
-        verify(shortUrlRepository, never()).save(any());
+        verify(shortUrlRepository, never()).incrementClickCount(any());
         verify(clickAnalyticsRecorder, never()).recordClick(any(), any(), any());
     }
 
     @Test
     void redirectToOriginalUrl_shouldSucceed_whenExpiresAtIsInTheFuture() {
-        ShortUrl notYetExpired = new ShortUrl("abc12345", "https://example.com");
-        notYetExpired.setExpiresAt(LocalDateTime.now().plusDays(1));
+        CachedShortUrl cached = new CachedShortUrl(1L, "https://example.com", true, LocalDateTime.now().plusDays(1));
 
-        when(shortUrlRepository.findByShortCode("abc12345")).thenReturn(Optional.of(notYetExpired));
-        when(shortUrlRepository.save(any(ShortUrl.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(shortUrlCache.lookupForRedirect("abc12345")).thenReturn(cached);
 
         String originalUrl = urlShortenerService.redirectToOriginalUrl("abc12345", null, null);
 
         assertEquals("https://example.com", originalUrl);
+    }
+
+    @Test
+    void redirectToOriginalUrl_shouldPropagateResourceNotFound_whenCacheThrowsForUnknownCode() {
+        when(shortUrlCache.lookupForRedirect("missing"))
+            .thenThrow(new ResourceNotFoundException("Short URL not found for code: missing"));
+
+        assertThrows(ResourceNotFoundException.class,
+            () -> urlShortenerService.redirectToOriginalUrl("missing", null, null));
     }
 
     @Test

@@ -39,4 +39,11 @@ class ShortUrlRepositoryTest {
         assertTrue(exists);
         verify(shortUrlRepository).existsByShortCode("code999");
     }
+
+    @Test
+    void incrementClickCount_shouldBeInvokedWithTheEntityId() {
+        shortUrlRepository.incrementClickCount(42L);
+
+        verify(shortUrlRepository).incrementClickCount(42L);
+    }
 }
