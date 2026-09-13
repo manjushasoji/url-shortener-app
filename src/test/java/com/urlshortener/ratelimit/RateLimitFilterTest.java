@@ -14,10 +14,21 @@ import static org.mockito.Mockito.verify;
 
 class RateLimitFilterTest {
 
+    /*
+     * A plain `new ObjectMapper()` has no Java 8 date/time support, so it
+     * fails serializing ApiError.timestamp (a LocalDateTime). In the running
+     * app this is a non-issue: Spring Boot's autoconfigured ObjectMapper bean
+     * already has jackson-datatype-jsr310 registered. findAndRegisterModules()
+     * mirrors that here instead of hardcoding the JavaTimeModule import.
+     */
+    private static ObjectMapper newObjectMapper() {
+        return new ObjectMapper().findAndRegisterModules();
+    }
+
     @Test
     void doFilter_shouldPassThrough_whenUnderLimit() throws Exception {
         FixedWindowRateLimiter limiter = new FixedWindowRateLimiter(2, 60_000);
-        RateLimitFilter filter = new RateLimitFilter(limiter, new ObjectMapper());
+        RateLimitFilter filter = new RateLimitFilter(limiter, newObjectMapper());
         FilterChain chain = Mockito.mock(FilterChain.class);
 
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/urls/abc12345");
@@ -33,7 +44,7 @@ class RateLimitFilterTest {
     @Test
     void doFilter_shouldReturn429_whenLimitExceeded() throws Exception {
         FixedWindowRateLimiter limiter = new FixedWindowRateLimiter(1, 60_000);
-        RateLimitFilter filter = new RateLimitFilter(limiter, new ObjectMapper());
+        RateLimitFilter filter = new RateLimitFilter(limiter, newObjectMapper());
         FilterChain chain = Mockito.mock(FilterChain.class);
 
         MockHttpServletRequest firstRequest = new MockHttpServletRequest("GET", "/api/v1/urls/abc12345");
@@ -54,7 +65,7 @@ class RateLimitFilterTest {
     @Test
     void doFilter_shouldTrackDifferentIpsIndependently() throws Exception {
         FixedWindowRateLimiter limiter = new FixedWindowRateLimiter(1, 60_000);
-        RateLimitFilter filter = new RateLimitFilter(limiter, new ObjectMapper());
+        RateLimitFilter filter = new RateLimitFilter(limiter, newObjectMapper());
         FilterChain chain = Mockito.mock(FilterChain.class);
 
         MockHttpServletRequest requestFromIpA = new MockHttpServletRequest("GET", "/api/v1/urls/abc12345");
