@@ -6,6 +6,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.time.LocalDateTime;
 
@@ -35,6 +36,11 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(InvalidUpdateRequestException.class)
     public ResponseEntity<ApiError> handleInvalidUpdateRequest(InvalidUpdateRequestException ex, HttpServletRequest request) {
         return buildError(HttpStatus.BAD_REQUEST, ex.getMessage(), request.getRequestURI());
+    }
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ApiError> handleNoResourceFound(NoResourceFoundException ex, HttpServletRequest request) {
+        return buildError(HttpStatus.NOT_FOUND, "No endpoint found for " + ex.getHttpMethod() + " " + request.getRequestURI(), request.getRequestURI());
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
