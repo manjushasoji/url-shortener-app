@@ -23,9 +23,10 @@ import org.springframework.security.web.SecurityFilterChain;
  * has no way to verify without a local build/run, whereas Basic Auth is
  * built into Spring Security and testable with curl/Postman out of the box.
  *
- * GET /api/v1/{shortCode} (redirect, RedirectController) stays public: a URL
+ * GET /{shortCode} (redirect, RedirectController) stays public: a URL
  * shortener's whole purpose is for arbitrary visitors to follow the link
- * without an account. Everything under /api/v1/urls/** requires ROLE_ADMIN.
+ * without an account. Everything under /api/v1/urls/** — including the
+ * bare /api/v1/urls collection (list) — requires ROLE_ADMIN.
  */
 @Configuration
 public class SecurityConfig {
@@ -61,12 +62,14 @@ public class SecurityConfig {
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(authorize -> authorize
                 // Order matters: authorizeHttpRequests matches top-to-bottom and stops at
-                // the first hit, not by specificity. /api/v1/urls/** is listed first so it
-                // always wins over the broader GET /api/v1/* rule below for any path under
-                // /urls — including a hypothetical future GET /api/v1/urls (e.g. "list all")
-                // that would otherwise collide with the single-segment redirect pattern.
+                // the first hit, not by specificity. The admin rule is listed first so it
+                // always wins for anything under /api/v1. /api/v1/urls/** also matches the
+                // bare /api/v1/urls (the list endpoint) — ** matches zero segments too.
                 .requestMatchers("/api/v1/urls/**").hasRole("ADMIN")
-                .requestMatchers(HttpMethod.GET, "/api/v1/*").permitAll()
+                // The public redirect lives at the root: exactly one path segment. The
+                // controller further constrains that segment to ShortCodes.PATTERN, so a
+                // root path that isn't a short code gets the normal 404, not a redirect.
+                .requestMatchers(HttpMethod.GET, "/*").permitAll()
                 .requestMatchers("/actuator/**", "/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**", "/error")
                 .permitAll()
                 .anyRequest().authenticated()

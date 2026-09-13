@@ -7,10 +7,10 @@ A working URL shortener (Spring Boot 3 / Java 21 / MySQL), built incrementally o
 - **Core:** create / resolve-metadata / redirect, short-code generation with collision retry, input validation.
 - **Analytics:** per-link click stats (total, first/last click, daily breakdown) via a dedicated `click_analytics` event table, not just a counter.
 - **Reliability:** Actuator health checks, per-IP rate limiting, async click recording (doesn't block the redirect), and an in-memory Caffeine cache on the redirect lookup.
-- **Management:** `PATCH` to update `active`/`expiresAt`, consistent JSON error responses for unmapped paths.
-- **Security:** `ROLE_ADMIN` (HTTP Basic) required for create/update/view-metadata/view-stats; the redirect endpoint stays public and lives in its own controller so that separation is structural, not just a matcher rule.
+- **Management:** paginated `GET /api/v1/urls` list, `PATCH` to update `active`/`expiresAt`, `DELETE` (removes the link and its analytics, evicts the cache), consistent JSON error responses for unmapped paths.
+- **Security:** `ROLE_ADMIN` (HTTP Basic) required for create/list/update/delete/view-metadata/view-stats; the redirect endpoint stays public at the root (`GET /{shortCode}`, regex-constrained so non-code root paths never reach it) and lives in its own controller so that separation is structural, not just a matcher rule.
 
-Full feature status, API reference, and setup steps: [README.md](../README.md). Gaps against the intended scope are tracked explicitly in its **Known Limitations** section rather than left implicit — e.g. no list/delete endpoints, no multi-user ownership, in-memory rate-limit/cache state that doesn't survive multiple instances.
+Full feature status, API reference, and setup steps: [README.md](../README.md). Gaps against the intended scope are tracked explicitly in its **Known Limitations** section rather than left implicit — e.g. no multi-user ownership, no list filtering, in-memory rate-limit/cache state that doesn't survive multiple instances.
 
 ## Architecture at a Glance
 
@@ -59,7 +59,7 @@ The engineer set scope and architecture; the AI executed within it and flagged w
 ## Trade-offs / What Would Change With More Time
 
 - Redis (or similar) for rate-limit and cache state, so both survive multiple instances instead of being per-instance.
-- List/delete endpoints and a real multi-user/ownership model instead of a single hardcoded admin.
+- A real multi-user/ownership model instead of a single hardcoded admin, and filtering on the list endpoint.
 - Live-database integration tests and basic load testing, run against a real MySQL instance.
 - Dependency CVE scanning (e.g. OWASP dependency-check) and a load-test baseline for the redirect path in CI, on top of the Checkstyle/SpotBugs gates already there.
 

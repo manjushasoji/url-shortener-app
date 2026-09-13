@@ -23,7 +23,10 @@ public class RateLimitConfig {
         FixedWindowRateLimiter fixedWindowRateLimiter, ObjectMapper objectMapper) {
         FilterRegistrationBean<RateLimitFilter> registration = new FilterRegistrationBean<>();
         registration.setFilter(new RateLimitFilter(fixedWindowRateLimiter, objectMapper));
-        registration.addUrlPatterns("/api/v1/*");
+        // Everything, with RateLimitFilter.shouldNotFilter carving out the
+        // operational/docs paths — the public redirect now lives at the root,
+        // so a prefix mapping like /api/v1/* would no longer cover it.
+        registration.addUrlPatterns("/*");
         registration.setName("rateLimitFilter");
         registration.setOrder(1);
         return registration;

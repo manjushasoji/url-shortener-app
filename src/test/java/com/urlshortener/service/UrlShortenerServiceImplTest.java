@@ -2,6 +2,7 @@ package com.urlshortener.service;
 
 import com.urlshortener.dto.ClickStatsResponse;
 import com.urlshortener.dto.CreateShortUrlRequest;
+import com.urlshortener.dto.PagedResponse;
 import com.urlshortener.dto.ShortUrlResponse;
 import com.urlshortener.dto.UpdateShortUrlRequest;
 import com.urlshortener.entity.ShortUrl;
@@ -19,7 +20,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.InOrder;
+import org.mockito.Mockito;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -139,6 +145,59 @@ class UrlShortenerServiceImplTest {
         when(shortUrlRepository.findByShortCode("missing")).thenReturn(Optional.empty());
 
         assertThrows(ResourceNotFoundException.class, () -> urlShortenerService.getShortUrlByCode("missing"));
+    }
+
+    @Test
+    void listShortUrls_shouldMapPageToResponseEnvelope() {
+        Pageable pageable = PageRequest.of(1, 2);
+        ShortUrl first = new ShortUrl("aaa11111", "https://a.example");
+        ShortUrl second = new ShortUrl("bbb22222", "https://b.example");
+        when(shortUrlRepository.findAll(pageable)).thenReturn(new PageImpl<>(List.of(first, second), pageable, 5));
+
+        PagedResponse<ShortUrlResponse> page = urlShortenerService.listShortUrls(pageable);
+
+        assertEquals(2, page.content().size());
+        assertEquals("aaa11111", page.content().get(0).shortCode());
+        assertEquals("bbb22222", page.content().get(1).shortCode());
+        assertEquals(1, page.page());
+        assertEquals(2, page.size());
+        assertEquals(5, page.totalElements());
+        assertEquals(3, page.totalPages());
+    }
+
+    @Test
+    void listShortUrls_shouldReturnEmptyEnvelope_whenNoUrls() {
+        Pageable pageable = PageRequest.of(0, 20);
+        when(shortUrlRepository.findAll(pageable)).thenReturn(new PageImpl<>(List.of(), pageable, 0));
+
+        PagedResponse<ShortUrlResponse> page = urlShortenerService.listShortUrls(pageable);
+
+        assertEquals(0, page.content().size());
+        assertEquals(0, page.totalElements());
+        assertEquals(0, page.totalPages());
+    }
+
+    @Test
+    void deleteShortUrl_shouldRemoveAnalyticsRowsThenTheUrl() {
+        ShortUrl existing = new ShortUrl("abc12345", "https://example.com");
+        when(shortUrlRepository.findByShortCode("abc12345")).thenReturn(Optional.of(existing));
+
+        urlShortenerService.deleteShortUrl("abc12345");
+
+        // Analytics first: click_analytics has no FK, so nothing else would clean them up.
+        InOrder inOrder = Mockito.inOrder(clickAnalyticsRepository, shortUrlRepository);
+        inOrder.verify(clickAnalyticsRepository).deleteAllByShortUrlId(existing.getId());
+        inOrder.verify(shortUrlRepository).delete(existing);
+    }
+
+    @Test
+    void deleteShortUrl_shouldThrowResourceNotFound_andDeleteNothing_whenCodeDoesNotExist() {
+        when(shortUrlRepository.findByShortCode("missing")).thenReturn(Optional.empty());
+
+        assertThrows(ResourceNotFoundException.class, () -> urlShortenerService.deleteShortUrl("missing"));
+
+        verify(clickAnalyticsRepository, never()).deleteAllByShortUrlId(any());
+        verify(shortUrlRepository, never()).delete(any(ShortUrl.class));
     }
 
     @Test

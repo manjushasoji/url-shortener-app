@@ -5,6 +5,7 @@ import com.urlshortener.config.SecurityConfig;
 import com.urlshortener.dto.ClickStatsResponse;
 import com.urlshortener.dto.CreateShortUrlRequest;
 import com.urlshortener.dto.DailyClickCount;
+import com.urlshortener.dto.PagedResponse;
 import com.urlshortener.dto.ShortUrlResponse;
 import com.urlshortener.dto.UpdateShortUrlRequest;
 import com.urlshortener.exception.ResourceNotFoundException;
@@ -14,6 +15,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
+import org.mockito.ArgumentCaptor;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.MediaType;
 import org.springframework.security.test.context.support.WithAnonymousUser;
 import org.springframework.security.test.context.support.WithMockUser;
@@ -23,10 +27,13 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -102,6 +109,82 @@ class UrlShortenerControllerTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.shortCode").value("xyz987"))
             .andExpect(jsonPath("$.clickCount").value(4));
+    }
+
+    @Test
+    void listShortUrls_shouldReturnPage_withNewestFirstDefault() throws Exception {
+        ShortUrlResponse newer = new ShortUrlResponse(2L, "newer123", "https://b.example", 5L, true, LocalDateTime.now());
+        ShortUrlResponse older = new ShortUrlResponse(1L, "older123", "https://a.example", 1L, true, LocalDateTime.now().minusDays(1));
+        when(urlShortenerService.listShortUrls(any(Pageable.class)))
+            .thenReturn(new PagedResponse<>(List.of(newer, older), 0, 20, 2, 1));
+
+        mockMvc.perform(get("/api/v1/urls"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.content.length()").value(2))
+            .andExpect(jsonPath("$.content[0].shortCode").value("newer123"))
+            .andExpect(jsonPath("$.page").value(0))
+            .andExpect(jsonPath("$.size").value(20))
+            .andExpect(jsonPath("$.totalElements").value(2))
+            .andExpect(jsonPath("$.totalPages").value(1));
+
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
+        verify(urlShortenerService).listShortUrls(pageable.capture());
+        assertEquals(0, pageable.getValue().getPageNumber());
+        assertEquals(20, pageable.getValue().getPageSize());
+        assertEquals(Sort.by(Sort.Direction.DESC, "createdAt"), pageable.getValue().getSort());
+    }
+
+    @Test
+    void listShortUrls_shouldHonourPageSizeAndSortParams() throws Exception {
+        when(urlShortenerService.listShortUrls(any(Pageable.class)))
+            .thenReturn(new PagedResponse<>(List.of(), 3, 5, 0, 0));
+
+        mockMvc.perform(get("/api/v1/urls").param("page", "3").param("size", "5").param("sort", "clickCount,desc"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.content").isEmpty());
+
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
+        verify(urlShortenerService).listShortUrls(pageable.capture());
+        assertEquals(3, pageable.getValue().getPageNumber());
+        assertEquals(5, pageable.getValue().getPageSize());
+        assertEquals(Sort.by(Sort.Direction.DESC, "clickCount"), pageable.getValue().getSort());
+    }
+
+    /*
+     * /api/v1/urls has no trailing segment, so this is the one endpoint whose
+     * coverage by the /api/v1/urls/** matcher depends on ** matching zero
+     * segments. A 401 here is the proof that it does.
+     */
+    @Test
+    @WithAnonymousUser
+    void listShortUrls_shouldReturnUnauthorized_whenNotAuthenticated() throws Exception {
+        mockMvc.perform(get("/api/v1/urls"))
+            .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void deleteShortUrl_shouldReturnNoContent() throws Exception {
+        mockMvc.perform(delete("/api/v1/urls/{shortCode}", "abc12345"))
+            .andExpect(status().isNoContent());
+
+        verify(urlShortenerService).deleteShortUrl("abc12345");
+    }
+
+    @Test
+    void deleteShortUrl_shouldReturnNotFound_whenCodeDoesNotExist() throws Exception {
+        doThrow(new ResourceNotFoundException("Short URL not found for code: missing"))
+            .when(urlShortenerService).deleteShortUrl("missing");
+
+        mockMvc.perform(delete("/api/v1/urls/{shortCode}", "missing"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.message").value("Short URL not found for code: missing"));
+    }
+
+    @Test
+    @WithAnonymousUser
+    void deleteShortUrl_shouldReturnUnauthorized_whenNotAuthenticated() throws Exception {
+        mockMvc.perform(delete("/api/v1/urls/{shortCode}", "abc12345"))
+            .andExpect(status().isUnauthorized());
     }
 
     @Test

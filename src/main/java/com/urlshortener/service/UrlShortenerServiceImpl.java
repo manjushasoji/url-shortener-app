@@ -3,6 +3,7 @@ package com.urlshortener.service;
 import com.urlshortener.dto.ClickStatsResponse;
 import com.urlshortener.dto.CreateShortUrlRequest;
 import com.urlshortener.dto.DailyClickCount;
+import com.urlshortener.dto.PagedResponse;
 import com.urlshortener.dto.ShortUrlResponse;
 import com.urlshortener.dto.UpdateShortUrlRequest;
 import com.urlshortener.entity.ShortUrl;
@@ -13,9 +14,11 @@ import com.urlshortener.exception.ResourceNotFoundException;
 import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.repository.ClickAnalyticsRepository;
 import com.urlshortener.repository.ShortUrlRepository;
+import com.urlshortener.util.ShortCodes;
 import com.urlshortener.util.UrlValidator;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -108,9 +111,34 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
         return toResponse(entity);
     }
 
+    @Override
+    @Transactional(readOnly = true)
+    public PagedResponse<ShortUrlResponse> listShortUrls(Pageable pageable) {
+        return PagedResponse.from(shortUrlRepository.findAll(pageable).map(this::toResponse));
+    }
+
+    /*
+     * click_analytics has no FK to short_url (see ARCHITECTURE.md), so the
+     * analytics rows have to be removed explicitly or they'd be orphaned.
+     * Both deletes run in the one transaction. The cache eviction is the
+     * same requirement as on update: without it a deleted code would keep
+     * redirecting from the cache until its TTL expired.
+     */
+    @Override
+    @Transactional
+    @CacheEvict(value = "shortUrls", key = "#shortCode")
+    public void deleteShortUrl(String shortCode) {
+        ShortUrl entity = shortUrlRepository.findByShortCode(shortCode)
+            .orElseThrow(() -> new ResourceNotFoundException("Short URL not found for code: " + shortCode));
+
+        clickAnalyticsRepository.deleteAllByShortUrlId(entity.getId());
+        shortUrlRepository.delete(entity);
+    }
+
     /*
      * @CacheEvict here is what keeps ShortUrlCache correct: active/expiresAt
-     * only ever change through this method, so evicting the entry for this
+     * only ever change through this method (and the row only disappears via
+     * deleteShortUrl, which evicts too), so evicting the entry for this
      * shortCode on every update means the next redirect always sees fresh
      * data. This only clears the cache on whichever instance handles the
      * request, though — see CacheConfig for the multi-instance caveat.
@@ -199,7 +227,7 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
         }
 
         normalized = normalized.toLowerCase(Locale.ROOT);
-        if (!normalized.matches("[a-zA-Z0-9-]{3,20}")) {
+        if (!normalized.matches(ShortCodes.PATTERN)) {
             throw new InvalidShortCodeException("Custom short code can contain only letters, numbers, and hyphen, 3-20 characters");
         }
 
