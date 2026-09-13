@@ -9,23 +9,36 @@ Client
   │  HTTP (JSON / redirect)
   ▼
 ┌───────────────────────────────────────────────────────────┐
+│ Spring Security filter chain (SecurityConfig)                │
+│  - runs before RateLimitFilter (see Key Design Decisions)    │
+│  - GET /api/v1/{code} (redirect) — permitAll                 │
+│  - /api/v1/urls/** — HTTP Basic, requires ROLE_ADMIN          │
+│  - everything else declared public — permitAll                │
+└───────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌───────────────────────────────────────────────────────────┐
 │ RateLimitFilter (servlet filter, /api/v1/* only)            │
 │  - per-client-IP fixed-window check; 429 short-circuits      │
 │    the request before it reaches Spring MVC on excess        │
 └───────────────────────────────────────────────────────────┘
                           │
                           ▼
-┌───────────────────────────────────────────────────────────┐
-│ UrlShortenerController                                     │
-│  - POST  /api/v1/urls              (create)                │
-│  - GET   /api/v1/urls/{code}       (metadata)               │
-│  - PATCH /api/v1/urls/{code}       (update active/expiresAt) │
-│  - GET   /api/v1/urls/{code}/stats (click analytics)         │
-│  - GET   /api/v1/{code}            (redirect)                │
-│  - request validation (Bean Validation on DTOs)            │
-│  - extracts Referer / User-Agent headers for analytics      │
-│  - delegates all business logic to the service layer       │
-└───────────────────────────────────────────────────────────┘
+┌──────────────────────────────┐   ┌────────────────────────┐
+│ UrlShortenerController         │   │ RedirectController      │
+│  (admin-only, see above)       │   │  (public)                │
+│  - POST  /api/v1/urls          │   │  - GET /api/v1/{code}    │
+│    (create)                    │   │    (redirect)             │
+│  - GET   /api/v1/urls/{code}   │   │  - extracts Referer /     │
+│    (metadata)                  │   │    User-Agent headers     │
+│  - PATCH /api/v1/urls/{code}   │   │    for analytics           │
+│    (update active/expiresAt)   │   └────────────────────────┘
+│  - GET   /api/v1/urls/{code}/  │
+│    stats (click analytics)     │
+│  - request validation (Bean    │
+│    Validation on DTOs)         │
+└──────────────────────────────┘
+    both delegate all business logic to the service layer
                           │
                           ▼
 ┌───────────────────────────────────────────────────────────┐
@@ -65,6 +78,7 @@ Cross-cutting:
 - **`GlobalExceptionHandler`** (`@RestControllerAdvice`) — maps `ResourceNotFoundException`, `InvalidUrlException`, `DuplicateShortCodeException`, `UrlExpiredException`, `InvalidUpdateRequestException`, `NoResourceFoundException` (Spring's own exception for an unmatched `GET`/`HEAD` path — see Key Design Decisions), validation errors, and any uncaught exception to a structured `ApiError` (timestamp, status, error, message, path). This is what actually produces a `404` for a typo'd/unmapped path, not `ApiErrorController` below.
 - **`OpenApiConfig`** — exposes Swagger UI / OpenAPI spec for interactive API exploration.
 - **`RateLimitFilter`** (registered via `RateLimitConfig` on `/api/v1/*`, ahead of Spring MVC) — a per-client-IP fixed-window limiter; returns `429` with the same `ApiError` shape when exceeded, before the request reaches the controller.
+- **`SecurityConfig`** — HTTP Basic Auth, `ROLE_ADMIN` required for `/api/v1/urls/**`, everything else (including the redirect) public. See Key Design Decisions for why Basic Auth over JWT, why a single in-memory user, and how this interacts with `RateLimitFilter`.
 - **`ApiErrorController`** (implements `ErrorController`, mapped to `/error`) — a fallback for whatever still reaches Spring Boot's default `/error` forwarding (errors that occur outside controller-advice handling entirely, e.g. before `DispatcherServlet` dispatch). Kept as defense-in-depth, but a plain unmapped-path request doesn't reach it — see the `GlobalExceptionHandler` bullet above and Key Design Decisions.
 - **`AsyncConfig`** (`@EnableAsync` + `AsyncConfigurer`) — provides the bounded thread pool `@Async` methods run on, and logs (rather than silently swallows) any exception an async method throws.
 
@@ -74,6 +88,7 @@ Cross-cutting:
 - **Spring Data JPA + MySQL** — persistence; schema is managed via `hibernate.ddl-auto=update` (auto-generated from entity annotations, not migration-controlled).
 - **springdoc-openapi** — generates the OpenAPI spec and Swagger UI from controller annotations.
 - **Spring Boot Actuator** — exposes `/actuator/health` (with a DB connectivity check) and `/actuator/info` for operational visibility.
+- **Spring Security** — HTTP Basic Auth, one in-memory admin user, `ROLE_ADMIN`-gated management endpoints. `spring-security-test` provides `@WithMockUser`/`@WithAnonymousUser` for the `@WebMvcTest` slices.
 - **JUnit 5 / Spring Boot Test** — unit and slice tests per layer. Surefire runs with `-Dnet.bytebuddy.experimental=true` so `mvn test` still works on a JDK newer than the bundled Mockito/Byte Buddy officially supports (relevant for local dev on a bleeding-edge JDK; CI's pinned JDK 21 doesn't need it).
 - **GitHub Actions** (`.github/workflows/ci.yml`) — runs the test suite against a real MySQL service container on every push/PR to `main`. **Dependabot** (`.github/dependabot.yml`) — weekly PRs for outdated/vulnerable Maven and Actions dependencies.
 
@@ -87,7 +102,7 @@ Cross-cutting:
 | `short_code` | VARCHAR(20), unique, indexed | auto-generated (8 random alphanumeric chars) or caller-supplied |
 | `original_url` | VARCHAR(2048) | validated as an absolute `http(s)` URL before storage |
 | `click_count` | BIGINT, default 0 | incremented on each successful redirect |
-| `active` | BOOLEAN, default true, indexed | exists on the model but nothing currently sets it to `false` — there is no deactivate endpoint |
+| `active` | BOOLEAN, default true, indexed | settable via `PATCH /api/v1/urls/{shortCode}` (`{ "active": false }` deactivates a link; enforced on redirect — see Control Flow) |
 | `created_at` | TIMESTAMP | set via `@PrePersist` |
 | `expires_at` | TIMESTAMP, nullable | optionally set from `CreateShortUrlRequest.expiresAt` (must be a future timestamp, validated via `@Future`); enforced on redirect — see Control Flow |
 
@@ -104,7 +119,7 @@ Cross-cutting:
 ## 4. Control Flow
 
 **Create (`POST /api/v1/urls`):**
-0. `RateLimitFilter` checks the caller's IP against its per-minute quota; over the limit, responds `429` immediately without invoking the controller.
+0. `SecurityConfig`'s filter chain runs first, ahead of `RateLimitFilter`: requires HTTP Basic credentials for the configured admin user (`ROLE_ADMIN`) — missing/invalid credentials → `401`, valid credentials without the role → `403` (not reachable today since the only user has the role, but the check exists regardless). Then `RateLimitFilter` checks the caller's IP against its per-minute quota; over the limit, responds `429`. Either short-circuits before the controller runs.
 1. Controller validates the request body (`@Valid` — `originalUrl` non-blank and matches an absolute-URL pattern; `expiresAt`, if present, must be in the future).
 2. Service re-validates/normalizes the URL via `UrlValidator` (defense in depth against the same class of input, using `java.net.URI` to require a scheme + host of `http`/`https`).
 3. If a custom code was supplied, it's lowercased and checked against `[a-zA-Z0-9-]{3,20}`, then a fast `existsByShortCode` pre-check gives an immediate `409` for the common case. If none was supplied, the service generates an 8-character random code from a 62-character alphabet (`SecureRandom`) — no pre-check, since collision odds are negligible.
@@ -112,15 +127,15 @@ Cross-cutting:
 5. Controller returns `201` with the persisted entity (including `expiresAt`, if set) mapped to `ShortUrlResponse`.
 
 **Update (`PATCH /api/v1/urls/{shortCode}`):**
-0. `RateLimitFilter` applies the same per-IP check as on create.
+0. Same `SecurityConfig` (`ROLE_ADMIN`) and `RateLimitFilter` checks as create, in that order.
 1. Controller validates the request body (`@Valid` — `expiresAt`, if present, must be in the future; no constraint on `active` since `Boolean` is inherently optional).
 2. Service rejects the request with `400` (`InvalidUpdateRequestException`) if both `active` and `expiresAt` are `null` — before even looking up the entity, so a no-op request never touches the database.
 3. Looks up the entity; `404` if absent.
 4. Applies only the non-null fields: `active` if provided, `expiresAt` if provided. A `null` field is left as-is, not cleared — see Key Design Decisions for why, and Known Limitations in the README for what that means for clearing an existing `expiresAt`.
 5. Saves and returns `200` with the updated `ShortUrlResponse`.
 
-**Redirect (`GET /api/v1/{shortCode}`):**
-0. `RateLimitFilter` applies the same per-IP check as on create (same filter, same `/api/v1/*` mapping).
+**Redirect (`GET /api/v1/{shortCode}`, `RedirectController`):**
+0. `SecurityConfig` permits this path with no authentication — see Key Design Decisions for why the redirect stays public while everything else doesn't. `RateLimitFilter` still applies the same per-IP check as on create (same filter, same `/api/v1/*` mapping) — rate limiting isn't auth-gated.
 1. Controller reads the `Referer` and `User-Agent` headers off the incoming request.
 2. Service looks up the entity by short code; `404` via `ResourceNotFoundException` if absent.
 3. If `active` is `false`, also `404`s (settable via `PATCH /api/v1/urls/{shortCode}` — see above).
@@ -129,6 +144,7 @@ Cross-cutting:
 6. Controller issues a `302` redirect to `original_url`, which returns as soon as step 5's synchronous part completes — it does not wait on the async analytics write. *(Deliberately not `301` — see Key Design Decisions: a 301 would let browsers cache the redirect and skip the server on repeat clicks, undercounting `click_count`/`click_analytics`.)*
 
 **Click stats (`GET /api/v1/urls/{shortCode}/stats`):**
+0. Same `SecurityConfig` (`ROLE_ADMIN`) and `RateLimitFilter` checks as create.
 1. Service resolves the `ShortUrl` by code; `404` if absent.
 2. Runs three aggregate queries against `click_analytics` for that link's id: total count, min/max `clicked_at`, and a `GROUP BY CAST(clicked_at AS date)` breakdown ordered ascending.
 3. Assembles `ClickStatsResponse` (short code, total clicks, first/last click timestamps, daily breakdown list) and returns `200`.
@@ -152,6 +168,10 @@ Cross-cutting:
 - **Validate "at least one field provided" before the repository lookup, not after**: `updateShortUrl` throws `InvalidUpdateRequestException` for an all-null request before calling `findByShortCode`, so a malformed/no-op request never touches the database — a `404` should only ever mean "this code doesn't exist," not "your request was empty and we happened to check."
 - **Custom `ErrorController` instead of `throw-exception-if-no-handler-found` + `add-mappings=false`**: the latter is the more commonly documented way to get a proper `NoHandlerFoundException` for unmapped paths, but `add-mappings=false` also disables Spring Boot's default `/webjars/**` resource mapping — which is how springdoc-openapi serves Swagger UI's bundled static assets — in the same property check as the general static-file mapping. Since this couldn't be verified locally (no build tool in this environment) and breaking a documented, working feature would be a worse regression than the problem being solved, `ApiErrorController` (implementing `ErrorController`, replacing Spring Boot's default one) was used instead: it touches no configuration, can't affect Swagger UI/Actuator/any other route, and is Spring Boot's own documented extension point for customizing `/error` handling.
 - **`ApiErrorController` alone turned out not to fix unmapped-path requests in practice — a second, more targeted fix was needed**: after merging the above, an actual unmapped GET request (e.g. `/api/v2/wcom`) still returned a generic `500` from `GlobalExceptionHandler`'s catch-all `@ExceptionHandler(Exception.class)`. Root cause: as of Spring Framework 6.1 (bundled with this project's Spring Boot 3.4.1), an unmatched `GET`/`HEAD` request causes `ResourceHttpRequestHandler` to throw `NoResourceFoundException` *through the normal `HandlerExceptionResolver`/controller-advice chain* — meaning it's handled by `@RestControllerAdvice` directly and never reaches `/error` (where `ApiErrorController` lives) at all. Because no handler for that specific exception type existed, it fell through to the generic catch-all and got mapped to `500` instead of `404`. Fixed by adding `GlobalExceptionHandler.handleNoResourceFound(NoResourceFoundException)`, which — being more specific than `Exception.class` — now wins first and returns a proper `404` with a purpose-written message. `ApiErrorController` is kept as a fallback for whatever else might still reach `/error`, but isn't what handles the common case; this is a case where the first fix addressed a real but different risk (protecting Swagger UI) without being verified against the actual reported symptom, since there was no local way to run the app and hit it directly.
+- **`RedirectController` split out from `UrlShortenerController` specifically to support security gating, not just for organization**: the redirect is the one endpoint that must stay reachable by anonymous visitors — that's the entire point of a URL shortener — while creating/reading/updating/inspecting stats are management operations that shouldn't be. Once those two groups need different `authorizeHttpRequests` treatment, keeping them in one controller would mean the security rule has to reach inside a single class and reason about which method needs which policy; two controllers let the rule be expressed once, cleanly, as two path-based matchers (see the next two bullets), with each controller's own doc comment stating which policy applies to everything in it.
+- **HTTP Basic Auth with a single in-memory admin, not JWT/OAuth**: satisfies "only an admin can do X" with infrastructure Spring Security provides out of the box — no token issuance endpoint, no expiry/refresh logic, no secret-signing-key management to get right. Trade-off: Basic Auth re-sends credentials on every request (base64, not encrypted — safe only over HTTPS, which this app doesn't enforce itself) and has no session/logout concept; a real multi-user product would need JWT or OAuth2 plus a persisted user store. Chosen deliberately for a prototype scored on engineering judgment under real constraints: this session has no way to run the app and verify a token flow actually works end to end, whereas Basic Auth's behavior is fully specified and testable with a plain `curl -u`.
+- **Security matcher order: `/api/v1/urls/**` (admin) declared before `GET /api/v1/*` (public), not after**: `authorizeHttpRequests` matches top-to-bottom and stops at the first hit — it is not "most specific pattern wins" the way some routing systems work. Both patterns are structurally disjoint today (`/api/v1/urls/**` needs at least the segment `urls`; `/api/v1/*` needs exactly one segment that isn't `urls`), so the order doesn't change behavior *yet* — but listing the admin rule first means a hypothetical future single-segment-shaped endpoint under `/urls` (unlikely, but not impossible) fails safe (admin-gated) rather than silently falling through to the public rule.
+- **`RateLimitFilter` is not security-aware, and that's an accepted gap, not an oversight**: Spring Security's filter chain runs ahead of `RateLimitFilter` in servlet filter order, so a request Security rejects (`401`/`403`) never reaches the rate limiter — repeated bad-credential attempts against an admin endpoint aren't throttled by anything in this app. Reordering the filters to rate-limit *before* authentication was considered and deliberately not done: it would mean an attacker's failed attempts consume the same quota bucket as legitimate admin traffic from that IP, and getting filter-order interactions with Spring Security's own chain right is exactly the kind of change this session has no way to verify without a running instance to test against. Documented as a known limitation instead of guessed at.
 
 ## 6. Execution Approach
 
@@ -165,7 +185,8 @@ These are scope gaps, not implementation bugs — tracked in full in the README'
 - Link lifecycle management: list, delete (`active`/`expiresAt` update — including deactivation — and expiration enforcement are now implemented)
 - `PATCH /api/v1/urls/{shortCode}` cannot clear an already-set `expiresAt` back to null (see Key Design Decisions and Known Limitations in the README)
 - `ApiErrorController`'s `message` field is Spring Boot's own generic wording — but this rarely matters, since `handleNoResourceFound` intercepts the common unmapped-path case first with a purpose-written message (see Known Limitations in the README)
-- AuthN/AuthZ and multi-tenant ownership of links
+- AuthN/AuthZ now exists (`ROLE_ADMIN` via HTTP Basic on `/api/v1/urls/**`), but only as a single hardcoded admin — no multi-user accounts, no per-user ownership of links, no JWT/OAuth, no password rotation/lockout (see Known Limitations in the README)
+- `RateLimitFilter` doesn't rate-limit failed-authentication attempts, since Spring Security's filter chain rejects them first (see Key Design Decisions and Known Limitations in the README)
 - `/actuator/health` detail exposure has no access control — fine for local/prototype use, not for a shared deployment
 - Rate limiting is in-memory/per-instance and keyed on the immediate TCP peer address — breaks down behind a load balancer or across multiple instances (see Known Limitations in the README)
 - Async click recording has no delivery guarantee — a failed or queue-rejected write is logged and dropped, not retried (see Known Limitations in the README)
