@@ -23,6 +23,11 @@ public class GlobalExceptionHandler {
         return buildError(HttpStatus.BAD_REQUEST, ex.getMessage(), request.getRequestURI());
     }
 
+    @ExceptionHandler(InvalidShortCodeException.class)
+    public ResponseEntity<ApiError> handleInvalidShortCode(InvalidShortCodeException ex, HttpServletRequest request) {
+        return buildError(HttpStatus.BAD_REQUEST, ex.getMessage(), request.getRequestURI());
+    }
+
     @ExceptionHandler(DuplicateShortCodeException.class)
     public ResponseEntity<ApiError> handleDuplicateCode(DuplicateShortCodeException ex, HttpServletRequest request) {
         return buildError(HttpStatus.CONFLICT, ex.getMessage(), request.getRequestURI());

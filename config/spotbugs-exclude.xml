@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Patterns suppressed project-wide, each with a reason. Anything not listed
+  here fails the build (see spotbugs-maven-plugin in pom.xml).
+-->
+<FindBugsFilter>
+    <!--
+      EI_EXPOSE_REP2 flags a constructor that stores a reference to a mutable
+      object. In a Spring app that is every constructor-injected collaborator
+      (e.g. the shared ObjectMapper in RateLimitFilter) — the container owns
+      those singletons and sharing the reference is the whole point. The
+      sibling pattern EI_EXPOSE_REP (a getter handing out internal state) is
+      deliberately NOT suppressed: DTOs must defensively copy, as
+      ClickStatsResponse does.
+    -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+</FindBugsFilter>

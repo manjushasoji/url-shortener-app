@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+    "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+    "https://checkstyle.org/dtds/configuration_1_3.dtd">
+<!--
+  A deliberately small, high-signal rule set: things that are unambiguous
+  hygiene rather than style debate. Every rule here fails the build, so each
+  one must be something the whole codebase already complies with or should.
+-->
+<module name="Checker">
+    <property name="charset" value="UTF-8"/>
+    <property name="severity" value="error"/>
+
+    <module name="FileTabCharacter">
+        <property name="eachLine" value="true"/>
+    </module>
+    <module name="NewlineAtEndOfFile"/>
+    <module name="RegexpSingleline">
+        <property name="format" value="\s+$"/>
+        <property name="message" value="Line has trailing whitespace."/>
+    </module>
+    <!-- Swagger @Operation/@ApiResponse descriptions are long prose strings that
+         are more readable unwrapped, so they are exempt. -->
+    <module name="LineLength">
+        <property name="fileExtensions" value="java"/>
+        <property name="max" value="160"/>
+        <property name="ignorePattern" value="^\s*@(Operation|ApiResponse|Parameter)\(|(summary|description) = &quot;|^import |^package "/>
+    </module>
+
+    <module name="TreeWalker">
+        <!-- Imports -->
+        <module name="AvoidStarImport"/>
+        <module name="UnusedImports"/>
+        <module name="RedundantImport"/>
+        <module name="IllegalImport"/>
+
+        <!-- Obvious bugs / dead code -->
+        <module name="EmptyBlock">
+            <property name="option" value="text"/>
+        </module>
+        <module name="EmptyStatement"/>
+        <module name="EqualsHashCode"/>
+        <module name="StringLiteralEquality"/>
+        <module name="MissingSwitchDefault"/>
+        <module name="FallThrough"/>
+        <module name="SimplifyBooleanExpression"/>
+        <module name="SimplifyBooleanReturn"/>
+        <module name="ModifiedControlVariable"/>
+        <module name="OneStatementPerLine"/>
+        <module name="UpperEll"/>
+
+        <!-- Structure -->
+        <module name="NeedBraces"/>
+        <module name="OuterTypeFilename"/>
+        <module name="PackageDeclaration"/>
+    </module>
+</module>

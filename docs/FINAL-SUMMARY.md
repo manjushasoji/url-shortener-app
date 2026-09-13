@@ -37,7 +37,20 @@ Every merged PR includes unit/slice tests in the same change (JUnit 5, Mockito, 
 - No end-to-end test of `@CacheEvict` actually clearing a live cache entry through the full service (unit-tested separately: the cache works, the eviction annotation is present — not wired together in one test).
 - No load/performance testing, no full `spring-boot:run` HTTP round-trip test.
 
-Every code change in this repo has been hand-verified by reading (no local Java/Maven toolchain in this working environment) — `./mvnw test` and `./mvnw spring-boot:run` should be run locally before relying on any of it. Full per-area breakdown: README **Testing**.
+Static quality gates: every push and PR runs `./mvnw verify` in GitHub Actions — Checkstyle (hygiene rules, `config/checkstyle.xml`), the full test suite against a real MySQL 8 container, then SpotBugs (`Max` effort, `Medium` threshold, suppressions with stated reasons in `config/spotbugs-exclude.xml`) — and any violation fails the build. Much of the AI-assisted work was authored in an environment without a local Java toolchain, so the engineer's local `./mvnw test` runs and CI were the actual verification for those changes, not the AI's reading of them; several entries in [AI-TRACEABILITY.md](AI-TRACEABILITY.md) (items 5–6) are exactly the cases where that local run caught what reading did not. Full per-area breakdown: README **Testing**.
+
+## Assumptions
+
+Stated here explicitly, since each one shapes a design decision above and would need revisiting if it stopped holding:
+
+- **Single instance, no reverse proxy.** The rate limiter and redirect cache are in-process and keyed on the direct TCP peer address. Multiple instances or a load balancer in front would multiply the effective rate limit, share one bucket for all proxied traffic, and leave `@CacheEvict` clearing only the instance that handled the write.
+- **One operator.** A single admin account, configured via environment variables, is sufficient — there is no multi-user model, link ownership, or password rotation.
+- **`PATCH` is the only write path for `active`/`expiresAt`.** Cache eviction is placed on that method alone; any future write path that bypasses it would leave the cache stale until the 5-minute TTL.
+- **Click accuracy outranks redirect latency, but analytics accuracy does not.** Hence a synchronous `click_count` increment on every redirect and a `302` (not `301`) so browsers cannot cache the hop — while the `click_analytics` row is written asynchronously and dropped on failure rather than retried.
+- **TLS is terminated elsewhere.** Basic Auth credentials travel base64-encoded, so the app assumes it sits behind something that enforces HTTPS; it does not enforce it itself.
+- **Prototype-grade schema management is acceptable.** `hibernate.ddl-auto=update` generates the schema from the entities; there is no versioned migration history, which would be the first thing to change before a shared environment.
+- **Local-dev credential defaults are never used outside local dev.** The committed `DB_PASSWORD`/`ADMIN_PASSWORD` fallbacks exist so `docker compose up -d && ./mvnw spring-boot:run` works with zero configuration; every real environment (including CI) overrides them via environment variables.
+- **Referrer and browser data are best-effort.** Browsers frequently omit `Referer`, and the hand-rolled `UserAgentParser` classifies only mainstream browsers; both fields are informational, not something a downstream decision should rely on.
 
 ## Oversight Model
 
@@ -48,6 +61,6 @@ The engineer set scope and architecture; the AI executed within it and flagged w
 - Redis (or similar) for rate-limit and cache state, so both survive multiple instances instead of being per-instance.
 - List/delete endpoints and a real multi-user/ownership model instead of a single hardcoded admin.
 - Live-database integration tests and basic load testing, run against a real MySQL instance.
-- Static analysis/linting in CI (currently build+test only).
+- Dependency CVE scanning (e.g. OWASP dependency-check) and a load-test baseline for the redirect path in CI, on top of the Checkstyle/SpotBugs gates already there.
 
 Each of these is already named as a specific, scoped gap — not a vague "more could be done" — in README **Known Limitations**, so the next engineer picking this up has a concrete starting list rather than a rediscovery task.

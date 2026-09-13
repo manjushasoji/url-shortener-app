@@ -7,6 +7,7 @@ import com.urlshortener.dto.ShortUrlResponse;
 import com.urlshortener.dto.UpdateShortUrlRequest;
 import com.urlshortener.entity.ShortUrl;
 import com.urlshortener.exception.DuplicateShortCodeException;
+import com.urlshortener.exception.InvalidShortCodeException;
 import com.urlshortener.exception.InvalidUpdateRequestException;
 import com.urlshortener.exception.ResourceNotFoundException;
 import com.urlshortener.exception.UrlExpiredException;
@@ -194,12 +195,12 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
     private String normalizeCustomCode(String customCode) {
         String normalized = customCode.trim();
         if (normalized.isEmpty()) {
-            throw new DuplicateShortCodeException("Custom short code cannot be empty");
+            throw new InvalidShortCodeException("Custom short code cannot be empty");
         }
 
         normalized = normalized.toLowerCase(Locale.ROOT);
         if (!normalized.matches("[a-zA-Z0-9-]{3,20}")) {
-            throw new DuplicateShortCodeException("Custom short code can contain only letters, numbers, and hyphen, 3-20 characters");
+            throw new InvalidShortCodeException("Custom short code can contain only letters, numbers, and hyphen, 3-20 characters");
         }
 
         return normalized;
