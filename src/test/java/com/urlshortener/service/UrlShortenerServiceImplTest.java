@@ -1,11 +1,14 @@
 package com.urlshortener.service;
 
+import com.urlshortener.dto.ClickStatsResponse;
 import com.urlshortener.dto.CreateShortUrlRequest;
 import com.urlshortener.dto.ShortUrlResponse;
 import com.urlshortener.entity.ShortUrl;
 import com.urlshortener.exception.DuplicateShortCodeException;
 import com.urlshortener.exception.InvalidUrlException;
 import com.urlshortener.exception.ResourceNotFoundException;
+import com.urlshortener.repository.ClickAnalyticsRepository;
+import com.urlshortener.repository.ClickAnalyticsRepository.DailyClickCountProjection;
 import com.urlshortener.repository.ShortUrlRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -13,11 +16,15 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -25,6 +32,9 @@ class UrlShortenerServiceImplTest {
 
     @Mock
     private ShortUrlRepository shortUrlRepository;
+
+    @Mock
+    private ClickAnalyticsRepository clickAnalyticsRepository;
 
     @InjectMocks
     private UrlShortenerServiceImpl urlShortenerService;
@@ -66,10 +76,50 @@ class UrlShortenerServiceImplTest {
         when(shortUrlRepository.findByShortCode("abc12345")).thenReturn(Optional.of(existing));
         when(shortUrlRepository.save(any(ShortUrl.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        String originalUrl = urlShortenerService.redirectToOriginalUrl("abc12345");
+        String originalUrl = urlShortenerService.redirectToOriginalUrl("abc12345", "https://ref.example", "test-agent");
 
         assertEquals("https://example.com", originalUrl);
         assertEquals(2L, existing.getClickCount());
+        verify(clickAnalyticsRepository).save(any());
+    }
+
+    @Test
+    void getClickStats_shouldAggregateTotalsAndDailyBreakdown() {
+        ShortUrl existing = new ShortUrl("abc12345", "https://example.com");
+        LocalDateTime first = LocalDateTime.of(2026, 1, 1, 9, 0);
+        LocalDateTime last = LocalDateTime.of(2026, 1, 2, 15, 30);
+
+        DailyClickCountProjection day1 = mockProjection(LocalDate.of(2026, 1, 1), 3L);
+        DailyClickCountProjection day2 = mockProjection(LocalDate.of(2026, 1, 2), 5L);
+
+        when(shortUrlRepository.findByShortCode("abc12345")).thenReturn(Optional.of(existing));
+        when(clickAnalyticsRepository.countByShortUrlId(existing.getId())).thenReturn(8L);
+        when(clickAnalyticsRepository.findFirstClickAt(existing.getId())).thenReturn(Optional.of(first));
+        when(clickAnalyticsRepository.findLastClickAt(existing.getId())).thenReturn(Optional.of(last));
+        when(clickAnalyticsRepository.findDailyClickCounts(existing.getId())).thenReturn(List.of(day1, day2));
+
+        ClickStatsResponse stats = urlShortenerService.getClickStats("abc12345");
+
+        assertEquals("abc12345", stats.shortCode());
+        assertEquals(8L, stats.totalClicks());
+        assertEquals(first, stats.firstClickAt());
+        assertEquals(last, stats.lastClickAt());
+        assertEquals(2, stats.dailyBreakdown().size());
+        assertEquals(3L, stats.dailyBreakdown().get(0).count());
+    }
+
+    @Test
+    void getClickStats_shouldThrowResourceNotFound_whenCodeDoesNotExist() {
+        when(shortUrlRepository.findByShortCode("missing")).thenReturn(Optional.empty());
+
+        assertThrows(ResourceNotFoundException.class, () -> urlShortenerService.getClickStats("missing"));
+    }
+
+    private DailyClickCountProjection mockProjection(LocalDate date, long count) {
+        DailyClickCountProjection projection = org.mockito.Mockito.mock(DailyClickCountProjection.class);
+        when(projection.getClickDate()).thenReturn(date);
+        when(projection.getClickCount()).thenReturn(count);
+        return projection;
     }
 
     @Test

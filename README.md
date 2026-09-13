@@ -13,7 +13,8 @@ A REST service for creating, resolving, and redirecting shortened URLs, built wi
 | Structured error responses | ✅ Implemented |
 | OpenAPI/Swagger documentation | ✅ Implemented |
 | Link expiration enforcement | ⚠️ Schema field exists (`expires_at`), not enforced yet |
-| Analytics (click trends, top links, referrer/geo data) | ❌ Not implemented — only a raw `click_count` counter exists |
+| Analytics: per-link click stats (total, first/last click, daily breakdown) | ✅ Implemented |
+| Analytics: "top links" listing across all URLs | ❌ Not implemented yet |
 | Reliability features (rate limiting, caching, health checks) | ❌ Not implemented |
 | List / update / delete / deactivate a short URL | ❌ Not implemented |
 | Authentication / ownership of links | ❌ Not implemented |
@@ -64,7 +65,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 |---|---|---|---|---|
 | `POST` | `/api/v1/urls` | Create a short URL from `{ originalUrl, customCode? }` | `201 Created` | `400` invalid URL/payload, `409` short code exists |
 | `GET` | `/api/v1/urls/{shortCode}` | Fetch metadata for a short code | `200 OK` | `404` not found |
-| `GET` | `/api/v1/{shortCode}` | Redirect to the original URL, increments click count | `301 Moved Permanently` | `404` not found or inactive |
+| `GET` | `/api/v1/{shortCode}` | Redirect to the original URL, increments click count and records a click event | `301 Moved Permanently` | `404` not found or inactive |
+| `GET` | `/api/v1/urls/{shortCode}/stats` | Click analytics: total clicks, first/last click timestamps, daily breakdown | `200 OK` | `404` not found |
 
 ## Testing
 
@@ -75,13 +77,13 @@ mvn test
 ```
 
 Current coverage (`src/test/java`):
-- `UrlShortenerControllerTest` — endpoint-level request/response behavior
-- `UrlShortenerServiceImplTest` — short-code generation, duplicate handling, redirect/click-count logic
+- `UrlShortenerControllerTest` — endpoint-level request/response behavior, including the click-stats endpoint
+- `UrlShortenerServiceImplTest` — short-code generation, duplicate handling, redirect/click-count logic, click-event recording, and stats aggregation
 - `UrlValidatorTest` — URL normalization/validation rules
-- `ShortUrlRepositoryTest` — persistence layer (`findByShortCode`, `existsByShortCode`)
+- `ShortUrlRepositoryTest` / `ClickAnalyticsRepositoryTest` — persistence layer contracts
 - `GlobalExceptionHandlerTest` — error response shape per exception type
 
-**Not yet covered:** concurrency/race conditions on short-code creation, expiration behavior (since it isn't implemented), load/performance testing.
+**Not yet covered:** concurrency/race conditions on short-code creation, expiration behavior (since it isn't implemented), the daily-breakdown JPQL query against a real MySQL instance (verified logically, not with an integration test against a live database), load/performance testing.
 
 ## Known Limitations
 
@@ -90,7 +92,9 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 - **Hardcoded DB credentials** committed in `application.properties` — should move to environment variables/secrets before any shared or production use.
 - **`expires_at` is not enforced** — the column exists on `ShortUrl` but `redirectToOriginalUrl` never checks it, so expired links still redirect.
 - **Race condition on short-code creation** — `existsByShortCode` is checked, then the entity is saved, with no unique-constraint-violation handling in between; concurrent requests could still collide (the DB has a unique index as a backstop, but the app doesn't catch/retry on that constraint violation).
-- **No analytics beyond a raw counter** — `click_count` increments but there's no endpoint to view trends, top links, or time-series data.
+- **Click recording is synchronous** — each redirect writes a `click_analytics` row in the same request/transaction as the redirect itself, adding a write to the hot path. Planned fix: move this to an async write once the reliability work lands, so analytics recording can't slow down or fail a redirect.
+- **No "top links" analytics view** — per-link stats (`/api/v1/urls/{shortCode}/stats`) are implemented, but there's no endpoint yet to list/sort all URLs by click volume.
+- **Daily-breakdown query untested against real MySQL** — the `CAST(... AS date)` JPQL aggregation in `ClickAnalyticsRepository` is covered by mock-based unit tests only; it hasn't been run against a live database yet.
 - **No reliability hardening** — no rate limiting, no caching, no Actuator health/readiness endpoints, no retry/circuit-breaker behavior.
 - **No management endpoints** — no list, update, delete, or deactivate operations; a link can never be turned off once created.
 - **No auth/ownership model** — any client can create/read any short URL.

@@ -1,16 +1,21 @@
 package com.urlshortener.service;
 
+import com.urlshortener.dto.ClickStatsResponse;
 import com.urlshortener.dto.CreateShortUrlRequest;
+import com.urlshortener.dto.DailyClickCount;
 import com.urlshortener.dto.ShortUrlResponse;
+import com.urlshortener.entity.ClickAnalytics;
 import com.urlshortener.entity.ShortUrl;
 import com.urlshortener.exception.DuplicateShortCodeException;
 import com.urlshortener.exception.ResourceNotFoundException;
+import com.urlshortener.repository.ClickAnalyticsRepository;
 import com.urlshortener.repository.ShortUrlRepository;
 import com.urlshortener.util.UrlValidator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.security.SecureRandom;
+import java.util.List;
 import java.util.Locale;
 
 @Service
@@ -19,10 +24,12 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
     private static final String ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final int DEFAULT_CODE_LENGTH = 8;
     private final ShortUrlRepository shortUrlRepository;
+    private final ClickAnalyticsRepository clickAnalyticsRepository;
     private final SecureRandom random = new SecureRandom();
 
-    public UrlShortenerServiceImpl(ShortUrlRepository shortUrlRepository) {
+    public UrlShortenerServiceImpl(ShortUrlRepository shortUrlRepository, ClickAnalyticsRepository clickAnalyticsRepository) {
         this.shortUrlRepository = shortUrlRepository;
+        this.clickAnalyticsRepository = clickAnalyticsRepository;
     }
 
     @Override
@@ -59,7 +66,7 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
 
     @Override
     @Transactional
-    public String redirectToOriginalUrl(String shortCode) {
+    public String redirectToOriginalUrl(String shortCode, String referrer, String userAgent) {
         ShortUrl entity = shortUrlRepository.findByShortCode(shortCode)
             .orElseThrow(() -> new ResourceNotFoundException("Short URL not found for code: " + shortCode));
 
@@ -69,8 +76,30 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
 
         entity.setClickCount((entity.getClickCount() == null ? 0L : entity.getClickCount()) + 1L);
         shortUrlRepository.save(entity);
+        clickAnalyticsRepository.save(new ClickAnalytics(entity.getId(), referrer, userAgent));
 
         return entity.getOriginalUrl();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public ClickStatsResponse getClickStats(String shortCode) {
+        ShortUrl entity = shortUrlRepository.findByShortCode(shortCode)
+            .orElseThrow(() -> new ResourceNotFoundException("Short URL not found for code: " + shortCode));
+
+        long totalClicks = clickAnalyticsRepository.countByShortUrlId(entity.getId());
+        List<DailyClickCount> dailyBreakdown = clickAnalyticsRepository.findDailyClickCounts(entity.getId())
+            .stream()
+            .map(p -> new DailyClickCount(p.getClickDate(), p.getClickCount()))
+            .toList();
+
+        return new ClickStatsResponse(
+            entity.getShortCode(),
+            totalClicks,
+            clickAnalyticsRepository.findFirstClickAt(entity.getId()).orElse(null),
+            clickAnalyticsRepository.findLastClickAt(entity.getId()).orElse(null),
+            dailyBreakdown
+        );
     }
 
     private String generateShortCode() {
