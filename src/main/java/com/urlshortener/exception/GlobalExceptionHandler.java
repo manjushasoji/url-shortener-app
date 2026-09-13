@@ -32,6 +32,11 @@ public class GlobalExceptionHandler {
         return buildError(HttpStatus.GONE, ex.getMessage(), request.getRequestURI());
     }
 
+    @ExceptionHandler(InvalidUpdateRequestException.class)
+    public ResponseEntity<ApiError> handleInvalidUpdateRequest(InvalidUpdateRequestException ex, HttpServletRequest request) {
+        return buildError(HttpStatus.BAD_REQUEST, ex.getMessage(), request.getRequestURI());
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ApiError> handleValidation(MethodArgumentNotValidException ex, HttpServletRequest request) {
         String message = ex.getBindingResult().getFieldErrors().stream()

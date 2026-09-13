@@ -17,10 +17,11 @@ Client
                           ▼
 ┌───────────────────────────────────────────────────────────┐
 │ UrlShortenerController                                     │
-│  - POST /api/v1/urls               (create)                │
-│  - GET  /api/v1/urls/{code}        (metadata)               │
-│  - GET  /api/v1/urls/{code}/stats  (click analytics)         │
-│  - GET  /api/v1/{code}             (redirect)                │
+│  - POST  /api/v1/urls              (create)                │
+│  - GET   /api/v1/urls/{code}       (metadata)               │
+│  - PATCH /api/v1/urls/{code}       (update active/expiresAt) │
+│  - GET   /api/v1/urls/{code}/stats (click analytics)         │
+│  - GET   /api/v1/{code}            (redirect)                │
 │  - request validation (Bean Validation on DTOs)            │
 │  - extracts Referer / User-Agent headers for analytics      │
 │  - delegates all business logic to the service layer       │
@@ -61,7 +62,7 @@ async path above is only for writing new click events.
 ```
 
 Cross-cutting:
-- **`GlobalExceptionHandler`** (`@RestControllerAdvice`) — maps `ResourceNotFoundException`, `InvalidUrlException`, `DuplicateShortCodeException`, `UrlExpiredException`, validation errors, and any uncaught exception to a structured `ApiError` (timestamp, status, error, message, path).
+- **`GlobalExceptionHandler`** (`@RestControllerAdvice`) — maps `ResourceNotFoundException`, `InvalidUrlException`, `DuplicateShortCodeException`, `UrlExpiredException`, `InvalidUpdateRequestException`, validation errors, and any uncaught exception to a structured `ApiError` (timestamp, status, error, message, path).
 - **`OpenApiConfig`** — exposes Swagger UI / OpenAPI spec for interactive API exploration.
 - **`RateLimitFilter`** (registered via `RateLimitConfig` on `/api/v1/*`, ahead of Spring MVC) — a per-client-IP fixed-window limiter; returns `429` with the same `ApiError` shape when exceeded, before the request reaches the controller.
 - **`AsyncConfig`** (`@EnableAsync` + `AsyncConfigurer`) — provides the bounded thread pool `@Async` methods run on, and logs (rather than silently swallows) any exception an async method throws.
@@ -109,11 +110,19 @@ Cross-cutting:
 4. The service attempts `save()`. Because `ShortUrl` uses `GenerationType.IDENTITY`, the INSERT (and any unique-constraint violation) happens synchronously inside `save()`, not on a later flush. A `DataIntegrityViolationException` here means a race: another request took the same code between the pre-check and the insert. For a custom code, this maps straight to `409`. For a generated code, the service retries with a fresh random code, up to 5 attempts, before giving up with `409`. *(This replaces the earlier check-then-act-only approach — see Key Design Decisions.)*
 5. Controller returns `201` with the persisted entity (including `expiresAt`, if set) mapped to `ShortUrlResponse`.
 
+**Update (`PATCH /api/v1/urls/{shortCode}`):**
+0. `RateLimitFilter` applies the same per-IP check as on create.
+1. Controller validates the request body (`@Valid` — `expiresAt`, if present, must be in the future; no constraint on `active` since `Boolean` is inherently optional).
+2. Service rejects the request with `400` (`InvalidUpdateRequestException`) if both `active` and `expiresAt` are `null` — before even looking up the entity, so a no-op request never touches the database.
+3. Looks up the entity; `404` if absent.
+4. Applies only the non-null fields: `active` if provided, `expiresAt` if provided. A `null` field is left as-is, not cleared — see Key Design Decisions for why, and Known Limitations in the README for what that means for clearing an existing `expiresAt`.
+5. Saves and returns `200` with the updated `ShortUrlResponse`.
+
 **Redirect (`GET /api/v1/{shortCode}`):**
 0. `RateLimitFilter` applies the same per-IP check as on create (same filter, same `/api/v1/*` mapping).
 1. Controller reads the `Referer` and `User-Agent` headers off the incoming request.
 2. Service looks up the entity by short code; `404` via `ResourceNotFoundException` if absent.
-3. If `active` is `false`, also `404`s (though nothing in the current code ever flips `active` to `false`).
+3. If `active` is `false`, also `404`s (settable via `PATCH /api/v1/urls/{shortCode}` — see above).
 4. If `expires_at` is set and is in the past, throws `UrlExpiredException` → `410 Gone`.
 5. Click count is incremented and saved (still on the request thread — this part stays synchronous, since a lost click count would be visibly wrong on the next metadata fetch). `ClickAnalyticsRecorder.recordClick` is then called, which dispatches to a background thread pool (`@Async`) that parses the browser name (`UserAgentParser`) and writes the `click_analytics` row — the request thread does not wait for this to finish.
 6. Controller issues a `302` redirect to `original_url`, which returns as soon as step 5's synchronous part completes — it does not wait on the async analytics write. *(Deliberately not `301` — see Key Design Decisions: a 301 would let browsers cache the redirect and skip the server on repeat clicks, undercounting `click_count`/`click_analytics`.)*
@@ -138,6 +147,8 @@ Cross-cutting:
 - **Hand-rolled `FixedWindowRateLimiter` (servlet filter) instead of a library like Bucket4j**: a fixed window per client IP, backed by a plain `ConcurrentHashMap`, is simple enough to review at a glance and needs zero new runtime dependencies — reasonable for a single-instance prototype. Trade-off vs. a token-bucket library: fixed windows allow a burst of up to 2x the limit right at a window boundary (e.g. 30 requests in the last second of one window, then another 30 in the first second of the next), where a token bucket smooths this out. A bigger limitation is that this is in-memory and per-instance — see Known Limitations in the README for what breaks if this ever runs behind a load balancer or across multiple instances.
 - **DB credentials as env-var-overridable properties with a committed local-dev default, not a secrets manager**: `${DB_URL:...}`/`${DB_USERNAME:root}`/`${DB_PASSWORD:admin1234}` in `application.properties` mean any real environment (including CI) sets real values via environment variables and the committed default is never exercised there, while local development stays zero-config. Trade-off: a placeholder credential string is still readable in git history, which a secrets-manager-only approach (no default, fail fast if unset) would avoid — deferred here in favor of not adding required setup friction to a prototype; see Known Limitations in the README.
 - **CI runs against a real MySQL service container, not a mocked/in-memory DB**: `UrlShortenerAppApplicationTests` is a `@SpringBootTest` that boots the full context, which fails immediately without a reachable datasource — so CI needed either a real MySQL container or a switch to something like H2 for tests. Chose the MySQL container specifically because it exercises the same SQL dialect and JPA behavior (e.g. the `CAST(... AS date)` aggregation query) the app actually runs on in every environment, rather than risking H2-only behavior diverging from MySQL in ways that only surface after deploying.
+- **`PATCH` update treats a `null`/omitted field as "leave unchanged," never as "clear it"**: `UpdateShortUrlRequest` has two optional fields, `active` and `expiresAt`. Without extra tooling (e.g. a `JsonNullable`-style wrapper), Jackson can't distinguish a field the client omitted from one explicitly sent as `null` — both deserialize identically. Rather than add that complexity for a single field, one convention had to be picked, and "unchanged" matches how most PATCH APIs behave and what most clients expect. The trade-off, called out in the README: there is currently no way to clear an already-set `expiresAt` back to permanent through this endpoint.
+- **Validate "at least one field provided" before the repository lookup, not after**: `updateShortUrl` throws `InvalidUpdateRequestException` for an all-null request before calling `findByShortCode`, so a malformed/no-op request never touches the database — a `404` should only ever mean "this code doesn't exist," not "your request was empty and we happened to check."
 
 ## 6. Execution Approach
 
@@ -148,7 +159,8 @@ Implementation proceeded layer-by-layer (entity → repository → service → c
 These are scope gaps, not implementation bugs — tracked in full in the README's Known Limitations:
 - A "top links" analytics view across all URLs (per-link stats are now implemented; cross-link aggregation is not)
 - Reliability concerns: caching, retry/circuit-breaking (health checks, rate limiting, and async click recording are now implemented)
-- Link lifecycle management: update, delete, deactivate (expiration is now implemented and enforced)
+- Link lifecycle management: list, delete (`active`/`expiresAt` update — including deactivation — and expiration enforcement are now implemented)
+- `PATCH /api/v1/urls/{shortCode}` cannot clear an already-set `expiresAt` back to null (see Key Design Decisions and Known Limitations in the README)
 - AuthN/AuthZ and multi-tenant ownership of links
 - `/actuator/health` detail exposure has no access control — fine for local/prototype use, not for a shared deployment
 - Rate limiting is in-memory/per-instance and keyed on the immediate TCP peer address — breaks down behind a load balancer or across multiple instances (see Known Limitations in the README)

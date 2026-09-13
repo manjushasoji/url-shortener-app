@@ -19,7 +19,8 @@ A REST service for creating, resolving, and redirecting shortened URLs, built wi
 | Reliability: per-IP rate limiting on `/api/v1/**` | ✅ Implemented |
 | Reliability: async click recording (doesn't block/fail the redirect) | ✅ Implemented |
 | Reliability: caching | ❌ Not implemented |
-| List / update / delete / deactivate a short URL | ❌ Not implemented |
+| Update a short URL's `active`/`expiresAt` (`PATCH /api/v1/urls/{shortCode}`) | ✅ Implemented |
+| List / delete a short URL | ❌ Not implemented |
 | Authentication / ownership of links | ❌ Not implemented |
 | CI: build + test on every push/PR to `main` | ✅ Implemented |
 | CI: dependency vulnerability alerts (Dependabot) | ✅ Implemented |
@@ -73,6 +74,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 |---|---|---|---|---|
 | `POST` | `/api/v1/urls` | Create a short URL from `{ originalUrl, customCode?, expiresAt? }` (`expiresAt` must be a future timestamp) | `201 Created` | `400` invalid URL/payload/expiresAt, `409` short code exists |
 | `GET` | `/api/v1/urls/{shortCode}` | Fetch metadata for a short code | `200 OK` | `404` not found |
+| `PATCH` | `/api/v1/urls/{shortCode}` | Partially update `{ active?, expiresAt? }` — a `null`/omitted field is left unchanged, not cleared | `200 OK` | `400` no fields provided or `expiresAt` not in the future, `404` not found |
 | `GET` | `/api/v1/{shortCode}` | Redirect to the original URL, increments click count and records a click event | `302 Found` | `404` not found or inactive, `410` link expired |
 | `GET` | `/api/v1/urls/{shortCode}/stats` | Click analytics: total clicks, first/last click timestamps, daily breakdown | `200 OK` | `404` not found |
 | `GET` | `/actuator/health` | Service + DB health check | `200 OK` (`503` if a dependency is down) | — |
@@ -96,7 +98,8 @@ Current coverage (`src/test/java`):
 - `UrlShortenerServiceImplTest` — short-code generation and collision retry, duplicate handling (including a save-time race for both generated and custom codes), redirect/click-count logic, expiration enforcement, and stats aggregation
 - `UrlValidatorTest` — URL normalization/validation rules
 - `ShortUrlRepositoryTest` / `ClickAnalyticsRepositoryTest` — persistence layer contracts
-- `GlobalExceptionHandlerTest` — error response shape per exception type, including the new `410` expired-link mapping
+- `GlobalExceptionHandlerTest` — error response shape per exception type, including `410` expired-link and `400` invalid-update mappings
+- `UrlShortenerServiceImplTest` / `UrlShortenerControllerTest` — the new `PATCH` endpoint: deactivate, update `expiresAt`, update both, leaving an unspecified field unchanged, rejecting an empty update, `404` for a missing code, and `400` for a past `expiresAt` (exercised end-to-end through real Bean Validation via MockMvc)
 - `FixedWindowRateLimiterTest` / `RateLimitFilterTest` — window limit/reset behavior (via an injectable `Clock`, not real sleeps) and the filter's pass-through/`429` responses per client IP
 - `ClickAnalyticsRecorderTest` — verifies what gets saved (parsed browser name, referrer); run directly rather than through Spring, so it exercises the business logic, not the actual async dispatch (see Not yet covered)
 
@@ -122,7 +125,8 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 - **`user_agent` stores a parsed browser name, not the raw header** — `UserAgentParser.extractBrowserName` reduces the raw `User-Agent` string down to one of `Chrome`, `Firefox`, `Safari`, `Edge`, `Opera`, `Internet Explorer`, `Other` (unrecognized client), or `Unknown` (header missing). It uses simple substring checks in a specific order (checking Edge/Opera before Chrome, since their UA strings also contain "Chrome") rather than a full parsing library, so unusual or future browser UA formats may fall into `Other`. The raw header itself is not retained.
 - **Rate limiting is in-memory, per-instance, and keyed on `request.getRemoteAddr()`** — fine for a single instance behind no proxy, but two problems if that changes: (1) running multiple instances means each has its own independent counter, so the effective limit multiplies with instance count; (2) behind a reverse proxy/load balancer, every request's remote address is the proxy's IP, not the real client's, so all traffic would share one bucket. A shared store (Redis) plus `X-Forwarded-For` handling would fix both — out of scope for this prototype.
 - **No caching, no retry/circuit-breaker behavior.** (Actuator health/info endpoints, rate limiting, and async click recording are implemented — see Features.)
-- **No management endpoints** — no list, update, delete, or deactivate operations; a link can never be turned off once created.
+- **`PATCH /api/v1/urls/{shortCode}` can't clear an already-set `expiresAt`** — a `null`/omitted `expiresAt` in the request means "leave unchanged," so once a link has an expiration, this endpoint has no way to remove it again (Jackson can't distinguish an omitted field from an explicit `null` in a record without extra tooling, so one convention had to be picked; "unchanged" matches typical PATCH semantics). Would need a dedicated action (e.g. a query param or separate endpoint) to support clearing it.
+- **No list or delete endpoints** — `active`/`expiresAt` can be updated (including deactivating a link), but there's still no way to enumerate all short URLs or permanently remove one.
 - **No auth/ownership model** — any client can create/read any short URL.
 - **CI covers build + test only** — no static analysis/linting or dependency-CVE scanning beyond Dependabot's alerts is wired in yet (see Continuous Integration above).
 
