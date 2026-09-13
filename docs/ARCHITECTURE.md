@@ -155,7 +155,7 @@ Cross-cutting:
 
 ## 6. Execution Approach
 
-Implementation proceeded layer-by-layer (entity → repository → service → controller → exception handling → tests), which is reflected in the codebase structure but not yet in fine-grained commit history (current history is 3 coarse commits). Task decomposition, the AI-assistance trail, and per-scenario execution notes are tracked separately as those docs are added (see the main [README](../README.md) Project Status section).
+The initial implementation proceeded layer-by-layer (entity → repository → service → controller → exception handling → tests). Everything since has shipped as one focused PR per task — one concern per branch, its own commit message stating intent and rationale, docs updated in the same PR as the code they describe. See [docs/SCENARIOS.md](SCENARIOS.md) for the task decomposition and AI-assistance trail behind specific examples of that process, with links to the actual merged PRs.
 
 ## 7. What This Architecture Does Not Yet Address
 

@@ -137,4 +137,4 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 
 ## Project Status
 
-This is an active, incremental build. Documentation of the engineering process (task decomposition, AI-assisted execution trail, scenario walkthroughs, and the final engineering summary) is being added alongside the code — see the `docs/` directory as it grows.
+This is an active, incremental build. See [docs/SCENARIOS.md](docs/SCENARIOS.md) for the greenfield/brownfield/ambiguous scenario walkthroughs (decomposition, execution, validation, with links to the actual merged PRs). A final engineering summary is still to be added — see `docs/` as it grows.
