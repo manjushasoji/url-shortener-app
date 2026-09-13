@@ -1,0 +1,101 @@
+# URL Shortener App
+
+A REST service for creating, resolving, and redirecting shortened URLs, built with Spring Boot 3 and MySQL.
+
+## Features
+
+| Capability | Status |
+|---|---|
+| Create a short URL (auto-generated or custom code) | ✅ Implemented |
+| Resolve short-code metadata (`GET /api/v1/urls/{shortCode}`) | ✅ Implemented |
+| Redirect via short code with click counting | ✅ Implemented |
+| Input validation (URL format, custom code format) | ✅ Implemented |
+| Structured error responses | ✅ Implemented |
+| OpenAPI/Swagger documentation | ✅ Implemented |
+| Link expiration enforcement | ⚠️ Schema field exists (`expires_at`), not enforced yet |
+| Analytics (click trends, top links, referrer/geo data) | ❌ Not implemented — only a raw `click_count` counter exists |
+| Reliability features (rate limiting, caching, health checks) | ❌ Not implemented |
+| List / update / delete / deactivate a short URL | ❌ Not implemented |
+| Authentication / ownership of links | ❌ Not implemented |
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and control flow, and **Known Limitations** below for the full gap list against the target scope.
+
+## Tech Stack
+
+- Java 21, Spring Boot 3.4.1 (Web, Data JPA, Validation)
+- MySQL 8 (via `mysql-connector-j`)
+- springdoc-openapi (Swagger UI)
+- JUnit 5 / Spring Boot Test
+
+## Prerequisites
+
+- JDK 21
+- Maven 3.9+ (or use the wrapper if one is added)
+- A running MySQL 8 instance
+
+## Setup
+
+1. **Create/configure the database.** The app auto-creates the schema (`spring.jpa.hibernate.ddl-auto=update`) and the database itself (`createDatabaseIfNotExist=true`), so you only need a reachable MySQL server and a user with privileges to create databases/tables.
+
+2. **Configure connection settings.** Current settings live in [`src/main/resources/application.properties`](src/main/resources/application.properties):
+
+   ```properties
+   spring.datasource.url=jdbc:mysql://localhost:3306/url_shortener?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+   spring.datasource.username=root
+   spring.datasource.password=admin1234
+   ```
+
+   > ⚠️ **Known issue:** these are hardcoded credentials committed to source control. Override them for your own environment via environment variables or a local `application-local.properties` (see Known Limitations) rather than editing the committed file with real credentials.
+
+3. **Build and run:**
+
+   ```bash
+   mvn clean install
+   mvn spring-boot:run
+   ```
+
+   The service starts on `http://localhost:8080`.
+
+4. **Explore the API:** Swagger UI is available at `http://localhost:8080/swagger-ui.html` (raw spec at `/v3/api-docs`).
+
+## API Reference
+
+| Method | Path | Description | Success | Failure |
+|---|---|---|---|---|
+| `POST` | `/api/v1/urls` | Create a short URL from `{ originalUrl, customCode? }` | `201 Created` | `400` invalid URL/payload, `409` short code exists |
+| `GET` | `/api/v1/urls/{shortCode}` | Fetch metadata for a short code | `200 OK` | `404` not found |
+| `GET` | `/api/v1/{shortCode}` | Redirect to the original URL, increments click count | `301 Moved Permanently` | `404` not found or inactive |
+
+## Testing
+
+Run the test suite with:
+
+```bash
+mvn test
+```
+
+Current coverage (`src/test/java`):
+- `UrlShortenerControllerTest` — endpoint-level request/response behavior
+- `UrlShortenerServiceImplTest` — short-code generation, duplicate handling, redirect/click-count logic
+- `UrlValidatorTest` — URL normalization/validation rules
+- `ShortUrlRepositoryTest` — persistence layer (`findByShortCode`, `existsByShortCode`)
+- `GlobalExceptionHandlerTest` — error response shape per exception type
+
+**Not yet covered:** concurrency/race conditions on short-code creation, expiration behavior (since it isn't implemented), load/performance testing.
+
+## Known Limitations
+
+These are open gaps against the intended scope (core APIs + analytics + reliability), tracked here rather than left implicit:
+
+- **Hardcoded DB credentials** committed in `application.properties` — should move to environment variables/secrets before any shared or production use.
+- **`expires_at` is not enforced** — the column exists on `ShortUrl` but `redirectToOriginalUrl` never checks it, so expired links still redirect.
+- **Race condition on short-code creation** — `existsByShortCode` is checked, then the entity is saved, with no unique-constraint-violation handling in between; concurrent requests could still collide (the DB has a unique index as a backstop, but the app doesn't catch/retry on that constraint violation).
+- **No analytics beyond a raw counter** — `click_count` increments but there's no endpoint to view trends, top links, or time-series data.
+- **No reliability hardening** — no rate limiting, no caching, no Actuator health/readiness endpoints, no retry/circuit-breaker behavior.
+- **No management endpoints** — no list, update, delete, or deactivate operations; a link can never be turned off once created.
+- **No auth/ownership model** — any client can create/read any short URL.
+- **No CI pipeline** — tests, linting, and security scanning are not automated.
+
+## Project Status
+
+This is an active, incremental build. Documentation of the engineering process (task decomposition, AI-assisted execution trail, scenario walkthroughs, and the final engineering summary) is being added alongside the code — see the `docs/` directory as it grows.
