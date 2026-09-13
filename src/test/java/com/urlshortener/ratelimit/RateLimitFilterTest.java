@@ -8,6 +8,8 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -60,6 +62,56 @@ class RateLimitFilterTest {
         assertEquals(429, secondResponse.getStatus());
         assertEquals("application/json", secondResponse.getContentType());
         verify(chain, times(1)).doFilter(any(), any());
+    }
+
+    @Test
+    void doFilter_shouldRateLimitTheRootRedirect() throws Exception {
+        FixedWindowRateLimiter limiter = new FixedWindowRateLimiter(1, 60_000);
+        RateLimitFilter filter = new RateLimitFilter(limiter, newObjectMapper());
+        FilterChain chain = Mockito.mock(FilterChain.class);
+
+        MockHttpServletRequest first = new MockHttpServletRequest("GET", "/abc12345");
+        first.setRemoteAddr("127.0.0.1");
+        filter.doFilter(first, new MockHttpServletResponse(), chain);
+
+        MockHttpServletRequest second = new MockHttpServletRequest("GET", "/abc12345");
+        second.setRemoteAddr("127.0.0.1");
+        MockHttpServletResponse secondResponse = new MockHttpServletResponse();
+        filter.doFilter(second, secondResponse, chain);
+
+        assertEquals(429, secondResponse.getStatus());
+        verify(chain, times(1)).doFilter(any(), any());
+    }
+
+    /*
+     * The filter is registered on /* (the redirect lives at the root now), so
+     * the exemption list is what keeps Swagger UI's dozen asset loads and
+     * actuator probes from eating the quota. Exempt requests must also not
+     * consume a slot — the limiter is never even consulted for them.
+     */
+    @Test
+    void shouldNotFilter_shouldExemptOperationalAndDocsPaths_withoutConsumingQuota() throws Exception {
+        FixedWindowRateLimiter limiter = new FixedWindowRateLimiter(1, 60_000);
+        RateLimitFilter filter = new RateLimitFilter(limiter, newObjectMapper());
+        FilterChain chain = Mockito.mock(FilterChain.class);
+
+        for (String path : new String[] {
+            "/actuator/health", "/swagger-ui.html", "/swagger-ui/index.html",
+            "/v3/api-docs", "/v3/api-docs/swagger-config", "/webjars/x.js", "/error"}) {
+            MockHttpServletRequest request = new MockHttpServletRequest("GET", path);
+            request.setRemoteAddr("127.0.0.1");
+            assertTrue(filter.shouldNotFilter(request), path + " should be exempt");
+            filter.doFilter(request, new MockHttpServletResponse(), chain);
+        }
+        verify(chain, times(7)).doFilter(any(), any());
+
+        // Quota untouched by the seven exempt requests: the first real one still passes.
+        MockHttpServletRequest real = new MockHttpServletRequest("GET", "/abc12345");
+        real.setRemoteAddr("127.0.0.1");
+        assertFalse(filter.shouldNotFilter(real));
+        MockHttpServletResponse realResponse = new MockHttpServletResponse();
+        filter.doFilter(real, realResponse, chain);
+        assertEquals(200, realResponse.getStatus());
     }
 
     @Test

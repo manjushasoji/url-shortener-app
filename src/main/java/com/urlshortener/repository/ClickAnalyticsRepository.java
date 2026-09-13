@@ -2,6 +2,7 @@ package com.urlshortener.repository;
 
 import com.urlshortener.entity.ClickAnalytics;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -26,6 +27,15 @@ public interface ClickAnalyticsRepository extends JpaRepository<ClickAnalytics, 
         + "FROM ClickAnalytics c WHERE c.shortUrlId = :shortUrlId "
         + "GROUP BY CAST(c.clickedAt AS date) ORDER BY clickDate ASC")
     List<DailyClickCountProjection> findDailyClickCounts(@Param("shortUrlId") Long shortUrlId);
+
+    /**
+     * Single bulk DELETE rather than a derived deleteByShortUrlId, which would
+     * load every row as an entity and delete them one at a time — a popular
+     * link can have thousands.
+     */
+    @Modifying
+    @Query("DELETE FROM ClickAnalytics c WHERE c.shortUrlId = :shortUrlId")
+    int deleteAllByShortUrlId(@Param("shortUrlId") Long shortUrlId);
 
     interface DailyClickCountProjection {
         LocalDate getClickDate();

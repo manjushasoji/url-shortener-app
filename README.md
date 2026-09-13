@@ -16,12 +16,12 @@ A REST service for creating, resolving, and redirecting shortened URLs, built wi
 | Analytics: per-link click stats (total, first/last click, daily breakdown) | ✅ Implemented |
 | Analytics: "top links" listing across all URLs | ❌ Not implemented yet |
 | Health checks (Spring Boot Actuator: `/actuator/health`, `/actuator/info`) | ✅ Implemented |
-| Reliability: per-IP rate limiting on `/api/v1/**` | ✅ Implemented |
+| Reliability: per-IP rate limiting on the API and the public redirect | ✅ Implemented |
 | Reliability: async click recording (doesn't block/fail the redirect) | ✅ Implemented |
 | Reliability: caching the redirect lookup (Caffeine, in-memory) | ✅ Implemented |
 | Update a short URL's `active`/`expiresAt` (`PATCH /api/v1/urls/{shortCode}`) | ✅ Implemented |
 | Consistent JSON `ApiError` for unmapped paths (instead of the whitelabel page) | ✅ Implemented |
-| List / delete a short URL | ❌ Not implemented |
+| List short URLs (paginated `GET /api/v1/urls`) / delete a short URL (`DELETE /api/v1/urls/{shortCode}`) | ✅ Implemented |
 | Authentication: `ROLE_ADMIN` (HTTP Basic) required for create/update/view metadata/view stats | ✅ Implemented |
 | Ownership of links (multi-user, per-user access) | ❌ Not implemented |
 | CI: build + test on every push/PR to `main` | ✅ Implemented |
@@ -83,7 +83,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 
 ## Authentication
 
-Every endpoint under `/api/v1/urls/**` (create, get metadata, update, stats) requires HTTP Basic Auth with the admin account configured in Setup. `GET /api/v1/{shortCode}` (the redirect) is deliberately public — a URL shortener has to work for anonymous visitors clicking the link, unlike managing the links themselves. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for why Basic Auth was chosen over JWT/OAuth.
+Every endpoint under `/api/v1/urls/**` (create, list, get metadata, update, delete, stats) requires HTTP Basic Auth with the admin account configured in Setup. `GET /{shortCode}` (the redirect, at the root so the short link is actually short) is deliberately public — a URL shortener has to work for anonymous visitors clicking the link, unlike managing the links themselves. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for why Basic Auth was chosen over JWT/OAuth.
 
 ```bash
 # Admin-only — requires credentials
@@ -92,7 +92,7 @@ curl -u admin:admin123 -X POST http://localhost:8080/api/v1/urls \
   -d '{"originalUrl": "https://example.com"}'
 
 # Public — no credentials needed
-curl -i http://localhost:8080/api/v1/abc12345
+curl -i http://localhost:8080/abc12345
 ```
 
 ## API Reference
@@ -100,15 +100,17 @@ curl -i http://localhost:8080/api/v1/abc12345
 | Method | Path | Auth | Description | Success | Failure |
 |---|---|---|---|---|---|
 | `POST` | `/api/v1/urls` | `ROLE_ADMIN` | Create a short URL from `{ originalUrl, customCode?, expiresAt? }` (`expiresAt` must be a future timestamp) | `201 Created` | `400` invalid URL/payload/expiresAt/custom-code format, `401`/`403` auth, `409` short code already taken |
+| `GET` | `/api/v1/urls` | `ROLE_ADMIN` | List short URLs, paginated: `page` (0-based, default 0), `size` (default 20, max 100 — larger values are clamped), `sort` (default `createdAt,desc`; any `ShortUrlResponse` field, e.g. `clickCount,desc`). Returns `{ content, page, size, totalElements, totalPages }` | `200 OK` | `401`/`403` auth |
 | `GET` | `/api/v1/urls/{shortCode}` | `ROLE_ADMIN` | Fetch metadata for a short code | `200 OK` | `401`/`403` auth, `404` not found |
 | `PATCH` | `/api/v1/urls/{shortCode}` | `ROLE_ADMIN` | Partially update `{ active?, expiresAt? }` — a `null`/omitted field is left unchanged, not cleared | `200 OK` | `400` no fields provided or `expiresAt` not in the future, `401`/`403` auth, `404` not found |
-| `GET` | `/api/v1/{shortCode}` | Public | Redirect to the original URL, increments click count and records a click event | `302 Found` | `404` not found or inactive, `410` link expired |
+| `DELETE` | `/api/v1/urls/{shortCode}` | `ROLE_ADMIN` | Permanently remove a short URL and all of its `click_analytics` rows; the code stops redirecting immediately and becomes available for reuse | `204 No Content` | `401`/`403` auth, `404` not found |
+| `GET` | `/{shortCode}` | Public | Redirect to the original URL, increments click count and records a click event. Only matches a path shaped like a short code (`[A-Za-z0-9-]{3,20}`), so `/favicon.ico` and the like get a normal `404` | `302 Found` | `404` not found or inactive, `410` link expired |
 | `GET` | `/api/v1/urls/{shortCode}/stats` | `ROLE_ADMIN` | Click analytics: total clicks, first/last click timestamps, daily breakdown | `200 OK` | `401`/`403` auth, `404` not found |
 | `GET` | `/actuator/health` | Public | Service + DB health check | `200 OK` (`503` if a dependency is down) | — |
 
-All `/api/v1/**` endpoints are also rate-limited per client IP (default: 30 requests/minute); an excess request gets `429 Too Many Requests` with the standard `ApiError` body.
+All `/api/v1/**` endpoints and the public redirect are rate-limited per client IP (default: 30 requests/minute); an excess request gets `429 Too Many Requests` with the standard `ApiError` body. Actuator, Swagger UI, the OpenAPI spec, and `/error` are exempt (Swagger UI alone loads a dozen assets on open).
 
-The redirect lookup (`GET /api/v1/{shortCode}`) is cached in-memory (Caffeine, 5-minute TTL, 10,000-entry cap) — a repeat click on the same short code skips the database entirely for the active/expiry decision. `click_count` is never cached and always writes through on every redirect, cache hit or not (see the Key Design Decisions in ARCHITECTURE.md for why click counting and the redirect-decision cache had to be kept strictly separate).
+The redirect lookup (`GET /{shortCode}`) is cached in-memory (Caffeine, 5-minute TTL, 10,000-entry cap) — a repeat click on the same short code skips the database entirely for the active/expiry decision. `click_count` is never cached and always writes through on every redirect, cache hit or not (see the Key Design Decisions in ARCHITECTURE.md for why click counting and the redirect-decision cache had to be kept strictly separate).
 
 Any path that doesn't match a route at all — a typo, a made-up endpoint, anywhere in the app, not just under `/api/v1` — returns the same `ApiError` JSON shape instead of an inconsistent response format. Two mechanisms are involved: an unmatched `GET`/`HEAD` request throws `NoResourceFoundException` through the normal controller-advice flow, so `GlobalExceptionHandler.handleNoResourceFound` catches it directly. Separately — and this turned out to be a much more common path than first thought — every Spring Security rejection (`401` missing/invalid credentials, `403` wrong role) is dispatched via `response.sendError()` straight to `/error`, which `ApiErrorController` handles; this is the *normal*, expected path for every unauthenticated request to an admin endpoint, not an edge case.
 
@@ -132,8 +134,9 @@ Current coverage (`src/test/java`):
 - `UrlValidatorTest` — URL normalization/validation rules
 - `ShortUrlRepositoryTest` / `ClickAnalyticsRepositoryTest` — persistence layer contracts
 - `GlobalExceptionHandlerTest` — error response shape per exception type, including `410` expired-link, `400` invalid-update, and `404` unmapped-path (`NoResourceFoundException`) mappings
+- `UrlShortenerServiceImplTest` — list (page → envelope mapping, empty page) and delete (analytics rows removed *before* the link, in order; nothing deleted on a `404`)
 - `UrlShortenerServiceImplTest` / `UrlShortenerControllerTest` — the new `PATCH` endpoint: deactivate, update `expiresAt`, update both, leaving an unspecified field unchanged, rejecting an empty update, `404` for a missing code, and `400` for a past `expiresAt` (exercised end-to-end through real Bean Validation via MockMvc)
-- `FixedWindowRateLimiterTest` / `RateLimitFilterTest` — window limit/reset behavior (via an injectable `Clock`, not real sleeps), that expired client windows are purged from memory once per window while still-active ones survive the sweep with their counts intact, and the filter's pass-through/`429` responses per client IP
+- `FixedWindowRateLimiterTest` / `RateLimitFilterTest` — window limit/reset behavior (via an injectable `Clock`, not real sleeps), that expired client windows are purged from memory once per window while still-active ones survive the sweep with their counts intact, the filter's pass-through/`429` responses per client IP, that the root redirect is throttled, and that the exempt operational/docs prefixes pass through without consuming quota
 - `ClickAnalyticsRecorderTest` — verifies what gets saved (parsed browser name, referrer); run directly rather than through Spring, so it exercises the business logic, not the actual async dispatch (see Not yet covered)
 - `ApiErrorControllerTest` — verifies the `/error` handler maps `HttpServletResponse.getStatus()` plus the error-attributes' `path`/`message` into the same `ApiError` shape as every other endpoint, including a dedicated regression test for the security-401-defaulted-to-500 bug and sensible defaults when an attribute or the response status is missing
 - `SecurityConfigTest` — the password encoder round-trips, and the in-memory admin user is registered with the configured username, a correctly-encoded password, and `ROLE_ADMIN`
@@ -168,7 +171,9 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 - **The cache assumes `active`/`expiresAt` only ever change through `updateShortUrl`** — true today (it's the only write path for either field), but `@CacheEvict` has no way to know if that assumption stops holding; a future write path that bypasses this method would leave the cache silently stale until TTL.
 - **No retry/circuit-breaker behavior.** (Actuator health/info endpoints, rate limiting, async click recording, and caching are implemented — see Features.)
 - **`PATCH /api/v1/urls/{shortCode}` can't clear an already-set `expiresAt`** — a `null`/omitted `expiresAt` in the request means "leave unchanged," so once a link has an expiration, this endpoint has no way to remove it again (Jackson can't distinguish an omitted field from an explicit `null` in a record without extra tooling, so one convention had to be picked; "unchanged" matches typical PATCH semantics). Would need a dedicated action (e.g. a query param or separate endpoint) to support clearing it.
-- **No list or delete endpoints** — `active`/`expiresAt` can be updated (including deactivating a link), but there's still no way to enumerate all short URLs or permanently remove one.
+- **The redirect moved from `/api/v1/{shortCode}` to `/{shortCode}` with no backward-compatibility route** — any short link handed out under the old path now returns `401` (not `404`), because an unknown path under `/api/v1` falls into the `anyRequest().authenticated()` catch-all. Deliberate: the point of the move was a shorter link, and keeping the old path alive would mean maintaining two public matchers for the same thing. If old links are in the wild, a one-line permanent redirect in a reverse proxy (`/api/v1/{code}` → `/{code}`) is the cleaner fix than re-adding it here.
+- **Delete is not race-free against an in-flight redirect** — `DELETE` removes the `short_url` row and its `click_analytics` rows in one transaction and evicts the cache, but a redirect that already passed its lookup can still enqueue an async `recordClick`, which then inserts an analytics row for an id that no longer exists (`click_analytics` has no FK, so the insert succeeds). Harmless — nothing reads analytics by a deleted id — but it means "delete removes all analytics" is true only up to that narrow window.
+- **The list endpoint has no filtering** — `GET /api/v1/urls` pages and sorts, but can't filter by `active`, expiry, or creation date, and there's still no "top links" view beyond `sort=clickCount,desc`.
 - **Single hardcoded admin account, not a user store** — `SecurityConfig` registers exactly one `InMemoryUserDetailsManager` user from `ADMIN_USERNAME`/`ADMIN_PASSWORD` (same env-var-with-local-dev-default pattern as the DB credentials, and the same residual caveat: a placeholder default is still committed). There's no way to add a second admin, no per-user accounts, no password rotation, and no account lockout after repeated failed attempts — appropriate for "prove role-gating works," not for anything with more than one operator.
 - **Basic Auth sends credentials on every request** — base64-encoded, not encrypted; safe only over HTTPS. This app doesn't terminate or enforce TLS itself (that's normally a reverse-proxy/load-balancer concern), so there's no local safeguard against Basic Auth credentials going out in the clear if someone hits the app directly over plain HTTP outside local dev.
 - **`RateLimitFilter` doesn't see requests Spring Security rejects** — Spring Security's filter chain runs before `RateLimitFilter` in the servlet filter order (Security's default order is well ahead of the `1` this custom filter registers at), so a failed-auth request to an admin endpoint is rejected with `401`/`403` before ever reaching the rate limiter. Practically: repeated bad-credential attempts against `/api/v1/urls/**` aren't counted against that IP's quota, and Spring Security itself has no built-in lockout either — brute-forcing the admin password isn't rate-limited by anything in this app today.

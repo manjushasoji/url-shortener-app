@@ -12,14 +12,24 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
- * Per-client-IP rate limiting for the public API. Uses request.getRemoteAddr()
+ * Per-client-IP rate limiting for application traffic — the admin API under
+ * /api/v1 and the public redirect at /{shortCode}. Operational and
+ * documentation paths (actuator, Swagger UI and its assets, the OpenAPI spec,
+ * and Spring Boot's /error) are exempt: Swagger UI alone loads a dozen assets
+ * on open, which would burn most of a 30-request window on its own.
+ *
+ * Uses request.getRemoteAddr()
  * as the client key, which is the immediate TCP peer — behind a reverse proxy
  * or load balancer without X-Forwarded-For handling, every request would
  * appear to come from the proxy's IP. Not handled here; see README.
  */
 public class RateLimitFilter extends OncePerRequestFilter {
+
+    static final List<String> EXEMPT_PREFIXES = List.of(
+        "/actuator", "/swagger-ui", "/v3/api-docs", "/webjars", "/error");
 
     private final FixedWindowRateLimiter rateLimiter;
     private final ObjectMapper objectMapper;
@@ -27,6 +37,12 @@ public class RateLimitFilter extends OncePerRequestFilter {
     public RateLimitFilter(FixedWindowRateLimiter rateLimiter, ObjectMapper objectMapper) {
         this.rateLimiter = rateLimiter;
         this.objectMapper = objectMapper;
+    }
+
+    @Override
+    protected boolean shouldNotFilter(HttpServletRequest request) {
+        String path = request.getRequestURI();
+        return EXEMPT_PREFIXES.stream().anyMatch(path::startsWith);
     }
 
     @Override

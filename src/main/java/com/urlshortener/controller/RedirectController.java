@@ -1,6 +1,7 @@
 package com.urlshortener.controller;
 
 import com.urlshortener.service.UrlShortenerService;
+import com.urlshortener.util.ShortCodes;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -10,18 +11,22 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.view.RedirectView;
 
 /**
  * Kept separate from UrlShortenerController specifically so it can stay
- * public while every other /api/v1 endpoint requires ROLE_ADMIN (see
+ * public while every /api/v1 endpoint requires ROLE_ADMIN (see
  * SecurityConfig) — a URL shortener's redirect has to work for anonymous
  * visitors, unlike creating/managing links.
+ *
+ * Mounted at the root (GET /{shortCode}) so the short link is actually
+ * short. The path variable is constrained to ShortCodes.PATTERN, so
+ * single-segment paths that don't look like a code (/favicon.ico,
+ * /swagger-ui.html, /error) are never routed here — they fall through to
+ * whatever else handles them, or to the normal 404.
  */
 @RestController
-@RequestMapping("/api/v1")
 @Tag(name = "Redirect", description = "Publicly resolve a short code to its original URL")
 public class RedirectController {
 
@@ -37,7 +42,7 @@ public class RedirectController {
         @ApiResponse(responseCode = "404", description = "Short URL not found or inactive"),
         @ApiResponse(responseCode = "410", description = "Short URL has expired")
     })
-    @GetMapping("/{shortCode}")
+    @GetMapping("/{shortCode:" + ShortCodes.PATTERN + "}")
     public RedirectView redirect(
         @Parameter(description = "Short code generated for the original URL", example = "abc12345")
         @PathVariable String shortCode,
