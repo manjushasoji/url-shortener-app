@@ -6,6 +6,9 @@ import com.urlshortener.exception.ResourceNotFoundException;
 import com.urlshortener.repository.ShortUrlRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.cache.CacheManagerCustomizer;
+import org.springframework.cache.CacheManager;
+import org.springframework.cache.caffeine.CaffeineCacheManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
@@ -28,6 +31,14 @@ import static org.mockito.Mockito.when;
  * @Cacheable proxy at all — the same self-invocation trap this project
  * already hit once with @Async (see ClickAnalyticsRecorder).
  *
+ * CacheConfig itself only defines a CacheManagerCustomizer bean — in the
+ * real app, Spring Boot's auto-configuration is what actually creates the
+ * CaffeineCacheManager bean and applies that customizer to it. This
+ * lightweight @SpringJUnitConfig context doesn't run that auto-configuration,
+ * so TestConfig builds the CaffeineCacheManager itself and applies
+ * CacheConfig's real customizer bean to it, to keep exercising the actual
+ * TTL/size settings rather than a stand-in.
+ *
  * Not covered here: @CacheEvict on UrlShortenerServiceImpl.updateShortUrl
  * actually evicting this same cache end-to-end — that would need
  * UrlShortenerServiceImpl itself wired into a cache-enabled context, which
@@ -42,6 +53,13 @@ class ShortUrlCacheCachingTest {
     @Configuration
     @Import(CacheConfig.class)
     static class TestConfig {
+
+        @Bean
+        CacheManager cacheManager(CacheManagerCustomizer<CaffeineCacheManager> customizer) {
+            CaffeineCacheManager cacheManager = new CaffeineCacheManager();
+            customizer.customize(cacheManager);
+            return cacheManager;
+        }
 
         @Bean
         ShortUrlRepository shortUrlRepository() {
