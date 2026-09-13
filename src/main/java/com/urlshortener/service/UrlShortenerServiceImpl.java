@@ -11,6 +11,7 @@ import com.urlshortener.exception.ResourceNotFoundException;
 import com.urlshortener.repository.ClickAnalyticsRepository;
 import com.urlshortener.repository.ShortUrlRepository;
 import com.urlshortener.util.UrlValidator;
+import com.urlshortener.util.UserAgentParser;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -76,7 +77,7 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
 
         entity.setClickCount((entity.getClickCount() == null ? 0L : entity.getClickCount()) + 1L);
         shortUrlRepository.save(entity);
-        clickAnalyticsRepository.save(new ClickAnalytics(entity.getId(), referrer, userAgent));
+        clickAnalyticsRepository.save(new ClickAnalytics(entity.getId(), referrer, UserAgentParser.extractBrowserName(userAgent)));
 
         return entity.getOriginalUrl();
     }

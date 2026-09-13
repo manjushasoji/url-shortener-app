@@ -3,6 +3,7 @@ package com.urlshortener.service;
 import com.urlshortener.dto.ClickStatsResponse;
 import com.urlshortener.dto.CreateShortUrlRequest;
 import com.urlshortener.dto.ShortUrlResponse;
+import com.urlshortener.entity.ClickAnalytics;
 import com.urlshortener.entity.ShortUrl;
 import com.urlshortener.exception.DuplicateShortCodeException;
 import com.urlshortener.exception.InvalidUrlException;
@@ -12,6 +13,7 @@ import com.urlshortener.repository.ClickAnalyticsRepository.DailyClickCountProje
 import com.urlshortener.repository.ShortUrlRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -72,15 +74,21 @@ class UrlShortenerServiceImplTest {
     void redirectToOriginalUrl_shouldReturnOriginalUrlAndIncrementClickCount() {
         ShortUrl existing = new ShortUrl("abc12345", "https://example.com");
         existing.setClickCount(1L);
+        String chromeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            + "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
         when(shortUrlRepository.findByShortCode("abc12345")).thenReturn(Optional.of(existing));
         when(shortUrlRepository.save(any(ShortUrl.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        String originalUrl = urlShortenerService.redirectToOriginalUrl("abc12345", "https://ref.example", "test-agent");
+        String originalUrl = urlShortenerService.redirectToOriginalUrl("abc12345", "https://ref.example", chromeUserAgent);
 
         assertEquals("https://example.com", originalUrl);
         assertEquals(2L, existing.getClickCount());
-        verify(clickAnalyticsRepository).save(any());
+
+        ArgumentCaptor<ClickAnalytics> clickAnalyticsCaptor = ArgumentCaptor.forClass(ClickAnalytics.class);
+        verify(clickAnalyticsRepository).save(clickAnalyticsCaptor.capture());
+        assertEquals("Chrome", clickAnalyticsCaptor.getValue().getUserAgent());
+        assertEquals("https://ref.example", clickAnalyticsCaptor.getValue().getReferrer());
     }
 
     @Test
