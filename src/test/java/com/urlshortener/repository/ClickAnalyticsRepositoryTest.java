@@ -51,6 +51,7 @@ class ClickAnalyticsRepositoryTest {
         List<DailyClickCountProjection> result = clickAnalyticsRepository.findDailyClickCounts(1L);
 
         assertEquals(1, result.size());
+        assertEquals(LocalDate.of(2026, 1, 1), result.get(0).getClickDate());
         assertEquals(3L, result.get(0).getClickCount());
     }
 }

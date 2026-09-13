@@ -21,6 +21,9 @@ A REST service for creating, resolving, and redirecting shortened URLs, built wi
 | Reliability: caching | ❌ Not implemented |
 | List / update / delete / deactivate a short URL | ❌ Not implemented |
 | Authentication / ownership of links | ❌ Not implemented |
+| CI: build + test on every push/PR to `main` | ✅ Implemented |
+| CI: dependency vulnerability alerts (Dependabot) | ✅ Implemented |
+| CI: static analysis / linting | ❌ Not implemented |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and control flow, and **Known Limitations** below for the full gap list against the target scope.
 
@@ -41,15 +44,15 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 
 1. **Create/configure the database.** The app auto-creates the schema (`spring.jpa.hibernate.ddl-auto=update`) and the database itself (`createDatabaseIfNotExist=true`), so you only need a reachable MySQL server and a user with privileges to create databases/tables.
 
-2. **Configure connection settings.** Current settings live in [`src/main/resources/application.properties`](src/main/resources/application.properties):
+2. **Configure connection settings.** [`src/main/resources/application.properties`](src/main/resources/application.properties) reads the datasource from environment variables, falling back to a local-dev-only default if unset:
 
    ```properties
-   spring.datasource.url=jdbc:mysql://localhost:3306/url_shortener?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
-   spring.datasource.username=root
-   spring.datasource.password=admin1234
+   spring.datasource.url=${DB_URL:jdbc:mysql://localhost:3306/url_shortener?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC}
+   spring.datasource.username=${DB_USERNAME:root}
+   spring.datasource.password=${DB_PASSWORD:admin1234}
    ```
 
-   > ⚠️ **Known issue:** these are hardcoded credentials committed to source control. Override them for your own environment via environment variables or a local `application-local.properties` (see Known Limitations) rather than editing the committed file with real credentials.
+   For local development against a MySQL instance with root/no-special-password, no setup is needed — the defaults just work. For anything else, set `DB_URL`, `DB_USERNAME`, and `DB_PASSWORD` as environment variables rather than editing this file; never commit real credentials here (see Known Limitations for what this does and doesn't solve).
 
 3. **Build and run:**
 
@@ -95,11 +98,17 @@ Current coverage (`src/test/java`):
 
 **Not yet covered:** an actual concurrent-load test hitting a real MySQL instance to prove the retry-on-collision path under real contention (the race is unit-tested by simulating the exception, not reproduced with real concurrent threads/connections), the daily-breakdown JPQL query against a real MySQL instance (verified logically, not with an integration test against a live database), that `@Async` actually dispatches `recordClick` onto a different thread in a running Spring context (a `@SpringBootTest` with real thread-pool timing would be needed; skipped here as disproportionate for a prototype), load/performance testing.
 
+## Continuous Integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `mvn test` on every push and pull request against `main`, against a real MySQL 8 service container (not mocked) — this exercises `UrlShortenerAppApplicationTests`' full Spring context load (`@SpringBootTest`), which needs a live datasource to even start, using the `DB_URL`/`DB_USERNAME`/`DB_PASSWORD` environment-variable overrides described in Setup. [`.github/dependabot.yml`](.github/dependabot.yml) opens weekly PRs for outdated/vulnerable Maven dependencies and GitHub Actions versions.
+
+Not automated: static analysis / linting (e.g. Checkstyle, SpotBugs) and any deeper security scanning (e.g. dependency CVE scanning beyond what Dependabot alerts on) — see Known Limitations.
+
 ## Known Limitations
 
 These are open gaps against the intended scope (core APIs + analytics + reliability), tracked here rather than left implicit:
 
-- **Hardcoded DB credentials** committed in `application.properties` — should move to environment variables/secrets before any shared or production use.
+- **DB credentials are environment-variable-overridable, but a placeholder default is still committed** (`DB_PASSWORD:admin1234` in `application.properties`) — this fixes the original problem (nothing forces anyone to use or extend that value; any real environment sets `DB_URL`/`DB_USERNAME`/`DB_PASSWORD` and the committed default is never touched), but a literal fallback string is still readable in source control. A stricter version would have no default at all and fail fast if the env vars are unset — left as a default here so local dev and CI stay zero/low-config; worth reconsidering before this repo is anything other than a prototype.
 - **`/actuator/health` shows full dependency details with no authentication** (`management.endpoint.health.show-details=always`) — acceptable for local/prototype use, but should be restricted (e.g. `when-authorized`, or gated behind network/auth controls) before any shared deployment, since it can reveal internal DB connectivity details to any caller.
 - **Short-code generation retries a fixed number of times (5) on collision, not indefinitely** — with an 8-character, 62-character-alphabet code space, collision odds are astronomically low, so this is a safety net rather than an expected path; if it's ever exhausted, `createShortUrl` fails with a clear `409` rather than looping forever.
 - **Async click recording has no delivery guarantee** — `ClickAnalyticsRecorder.recordClick` runs on a bounded background thread pool (`@Async`, core 2 / max 8 / queue 500); if the DB write fails, it's only logged (`AsyncConfig`'s uncaught-exception handler), not retried, and the click is silently dropped from analytics. If the queue fills up under sustained load, further async submissions are rejected (default `AbortPolicy`) and would also be logged-and-dropped rather than blocking the redirect. Acceptable since analytics accuracy is explicitly secondary to redirect availability here, but worth knowing before relying on click counts being exact.
@@ -111,7 +120,7 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 - **No caching, no retry/circuit-breaker behavior.** (Actuator health/info endpoints, rate limiting, and async click recording are implemented — see Features.)
 - **No management endpoints** — no list, update, delete, or deactivate operations; a link can never be turned off once created.
 - **No auth/ownership model** — any client can create/read any short URL.
-- **No CI pipeline** — tests, linting, and security scanning are not automated.
+- **CI covers build + test only** — no static analysis/linting or dependency-CVE scanning beyond Dependabot's alerts is wired in yet (see Continuous Integration above).
 
 ## Project Status
 
