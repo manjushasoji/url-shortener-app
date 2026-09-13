@@ -10,10 +10,12 @@ Client
   ▼
 ┌───────────────────────────────────────────────────────────┐
 │ UrlShortenerController                                     │
-│  - POST /api/v1/urls          (create)                     │
-│  - GET  /api/v1/urls/{code}   (metadata)                   │
-│  - GET  /api/v1/{code}        (redirect)                   │
+│  - POST /api/v1/urls               (create)                │
+│  - GET  /api/v1/urls/{code}        (metadata)               │
+│  - GET  /api/v1/urls/{code}/stats  (click analytics)         │
+│  - GET  /api/v1/{code}             (redirect)                │
 │  - request validation (Bean Validation on DTOs)            │
+│  - extracts Referer / User-Agent headers for analytics      │
 │  - delegates all business logic to the service layer       │
 └───────────────────────────────────────────────────────────┘
                           │
@@ -24,19 +26,25 @@ Client
 │  - generates an 8-char random short code, or normalizes a   │
 │    caller-supplied custom code                              │
 │  - enforces short-code uniqueness before persisting          │
-│  - increments click_count on redirect                       │
+│  - increments click_count and records a click_analytics      │
+│    row on redirect                                           │
+│  - aggregates click_analytics into per-link stats            │
 │  - maps entities <-> response DTOs                          │
 └───────────────────────────────────────────────────────────┘
                           │
                           ▼
 ┌───────────────────────────────────────────────────────────┐
-│ ShortUrlRepository (Spring Data JPA)                        │
+│ ShortUrlRepository / ClickAnalyticsRepository (Spring Data   │
+│ JPA)                                                         │
 │  - findByShortCode / existsByShortCode                       │
+│  - countByShortUrlId / findFirstClickAt / findLastClickAt /   │
+│    findDailyClickCounts (grouped aggregation)                │
 └───────────────────────────────────────────────────────────┘
                           │
                           ▼
-                    MySQL: short_url table
-       (unique index on short_code, index on active)
+        MySQL: short_url table            click_analytics table
+   (unique index on short_code,      (indexed on short_url_id and
+       index on active)                       clicked_at)
 ```
 
 Cross-cutting:
@@ -64,6 +72,16 @@ Cross-cutting:
 | `created_at` | TIMESTAMP | set via `@PrePersist` |
 | `expires_at` | TIMESTAMP, nullable | **present in the schema but never read** — see Known Limitations in the README |
 
+`click_analytics` table (backing the `ClickAnalytics` entity) — one row per redirect:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | BIGINT, PK, identity | |
+| `short_url_id` | BIGINT, indexed | logically references `short_url.id`, but stored as a plain value — no JPA `@ManyToOne` relation or DB-level foreign-key constraint (see Key Design Decisions) |
+| `clicked_at` | TIMESTAMP, indexed | set via `@PrePersist`; indexed to support the daily-breakdown aggregation query |
+| `referrer` | VARCHAR(2048), nullable | from the `Referer` request header, when present |
+| `user_agent` | VARCHAR(512), nullable | from the `User-Agent` request header, when present |
+
 ## 4. Control Flow
 
 **Create (`POST /api/v1/urls`):**
@@ -74,10 +92,16 @@ Cross-cutting:
 5. Controller returns `201` with the persisted entity mapped to `ShortUrlResponse`.
 
 **Redirect (`GET /api/v1/{shortCode}`):**
-1. Service looks up the entity by short code; `404` via `ResourceNotFoundException` if absent.
-2. If `active` is `false`, also `404`s (though nothing in the current code ever flips `active` to `false`).
-3. Click count is incremented and saved.
-4. Controller issues a `301` redirect to `original_url`.
+1. Controller reads the `Referer` and `User-Agent` headers off the incoming request.
+2. Service looks up the entity by short code; `404` via `ResourceNotFoundException` if absent.
+3. If `active` is `false`, also `404`s (though nothing in the current code ever flips `active` to `false`).
+4. Click count is incremented and saved, and a `click_analytics` row is written in the same transaction (short_url_id, timestamp, referrer, user agent). *(This makes the write path do more work per redirect — see Known Limitations regarding making this async.)*
+5. Controller issues a `301` redirect to `original_url`.
+
+**Click stats (`GET /api/v1/urls/{shortCode}/stats`):**
+1. Service resolves the `ShortUrl` by code; `404` if absent.
+2. Runs three aggregate queries against `click_analytics` for that link's id: total count, min/max `clicked_at`, and a `GROUP BY CAST(clicked_at AS date)` breakdown ordered ascending.
+3. Assembles `ClickStatsResponse` (short code, total clicks, first/last click timestamps, daily breakdown list) and returns `200`.
 
 ## 5. Key Design Decisions
 
@@ -85,6 +109,8 @@ Cross-cutting:
 - **Random short codes over sequence-based/hash-based encoding** (e.g., base62 of the auto-increment ID): simpler to implement and avoids leaking row-count/creation-order information through the code, at the cost of needing a uniqueness check per creation rather than a guaranteed-unique derivation.
 - **`ddl-auto=update` instead of a migration tool (Flyway/Liquibase)**: faster to iterate on for a prototype, but not something to carry into a shared/production environment — schema changes aren't versioned or reviewable as migrations.
 - **301 (permanent) redirect**: matches typical URL-shortener semantics (and lets browsers cache the redirect), but means a redirect target can never be safely changed after creation without risking stale client-side caches — a trade-off worth revisiting once/if an "update URL" feature is added.
+- **Event table (`click_analytics`) instead of only a counter**: a single `click_count` integer can't answer "clicks over time" or support a future "top links" view, so individual click events are recorded and aggregated on read. Trade-off: this is a write on every redirect (one INSERT plus the existing `click_count` UPDATE) instead of a single UPDATE — acceptable for a prototype, but the reason the README calls out making this write asynchronous as a near-term reliability follow-up.
+- **`short_url_id` stored as a plain indexed column, not a JPA `@ManyToOne`**: avoids loading/managing the `ShortUrl` association just to write an analytics row, keeping the redirect's hot path lighter at the cost of no referential-integrity enforcement — there's an index on `short_url_id` for query performance, but no actual foreign-key constraint or cascade behavior at either the entity or schema level.
 
 ## 6. Execution Approach
 
@@ -93,7 +119,8 @@ Implementation proceeded layer-by-layer (entity → repository → service → c
 ## 7. What This Architecture Does Not Yet Address
 
 These are scope gaps, not implementation bugs — tracked in full in the README's Known Limitations:
-- Analytics beyond a single counter column
+- A "top links" analytics view across all URLs (per-link stats are now implemented; cross-link aggregation is not)
+- Async click recording — analytics writes currently happen synchronously on the redirect path
 - Reliability concerns: rate limiting, caching, health checks, retry/circuit-breaking
 - Link lifecycle management: update, delete, deactivate, expiration enforcement
 - AuthN/AuthZ and multi-tenant ownership of links

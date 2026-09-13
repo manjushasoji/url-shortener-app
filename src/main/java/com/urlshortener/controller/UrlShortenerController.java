@@ -1,5 +1,6 @@
 package com.urlshortener.controller;
 
+import com.urlshortener.dto.ClickStatsResponse;
 import com.urlshortener.dto.CreateShortUrlRequest;
 import com.urlshortener.dto.ShortUrlResponse;
 import com.urlshortener.service.UrlShortenerService;
@@ -8,6 +9,7 @@ import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -62,10 +64,27 @@ public class UrlShortenerController {
     @GetMapping("/{shortCode}")
     public RedirectView redirect(
         @Parameter(description = "Short code generated for the original URL", example = "abc12345")
-        @PathVariable String shortCode) {
-        String originalUrl = urlShortenerService.redirectToOriginalUrl(shortCode);
+        @PathVariable String shortCode,
+        HttpServletRequest request) {
+        String originalUrl = urlShortenerService.redirectToOriginalUrl(
+            shortCode,
+            request.getHeader("Referer"),
+            request.getHeader("User-Agent")
+        );
         RedirectView redirectView = new RedirectView(originalUrl);
         redirectView.setStatusCode(HttpStatus.MOVED_PERMANENTLY);
         return redirectView;
+    }
+
+    @Operation(summary = "Get click analytics", description = "Returns click statistics for a shortened URL, including a daily click breakdown.")
+    @ApiResponses(value = {
+        @ApiResponse(responseCode = "200", description = "Stats found"),
+        @ApiResponse(responseCode = "404", description = "Short URL not found")
+    })
+    @GetMapping("/urls/{shortCode}/stats")
+    public ResponseEntity<ClickStatsResponse> getClickStats(
+        @Parameter(description = "Short code generated for the original URL", example = "abc12345")
+        @PathVariable String shortCode) {
+        return ResponseEntity.ok(urlShortenerService.getClickStats(shortCode));
     }
 }
