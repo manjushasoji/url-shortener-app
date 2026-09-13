@@ -22,7 +22,8 @@ A REST service for creating, resolving, and redirecting shortened URLs, built wi
 | Update a short URL's `active`/`expiresAt` (`PATCH /api/v1/urls/{shortCode}`) | ✅ Implemented |
 | Consistent JSON `ApiError` for unmapped paths (instead of the whitelabel page) | ✅ Implemented |
 | List / delete a short URL | ❌ Not implemented |
-| Authentication / ownership of links | ❌ Not implemented |
+| Authentication: `ROLE_ADMIN` (HTTP Basic) required for create/update/view metadata/view stats | ✅ Implemented |
+| Ownership of links (multi-user, per-user access) | ❌ Not implemented |
 | CI: build + test on every push/PR to `main` | ✅ Implemented |
 | CI: dependency vulnerability alerts (Dependabot) | ✅ Implemented |
 | CI: static analysis / linting | ❌ Not implemented |
@@ -31,10 +32,10 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 
 ## Tech Stack
 
-- Java 21, Spring Boot 3.4.1 (Web, Data JPA, Validation)
+- Java 21, Spring Boot 3.4.1 (Web, Data JPA, Validation, Security)
 - MySQL 8 (via `mysql-connector-j`)
 - springdoc-openapi (Swagger UI)
-- JUnit 5 / Spring Boot Test
+- JUnit 5 / Spring Boot Test / spring-security-test
 
 ## Prerequisites
 
@@ -56,7 +57,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 
    For local development against a MySQL instance with root/no-special-password, no setup is needed — the defaults just work. For anything else, set `DB_URL`, `DB_USERNAME`, and `DB_PASSWORD` as environment variables rather than editing this file; never commit real credentials here (see Known Limitations for what this does and doesn't solve).
 
-3. **Build and run:**
+3. **Configure the admin account.** The same pattern is used for the one admin user this API authenticates: `security.admin.username=${ADMIN_USERNAME:admin}` / `security.admin.password=${ADMIN_PASSWORD:admin123}` in `application.properties`. Override via `ADMIN_USERNAME`/`ADMIN_PASSWORD` env vars for anything beyond local dev.
+
+4. **Build and run:**
 
    ```bash
    mvn clean install
@@ -65,20 +68,34 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 
    The service starts on `http://localhost:8080`.
 
-4. **Explore the API:** Swagger UI is available at `http://localhost:8080/swagger-ui.html` (raw spec at `/v3/api-docs`).
+5. **Explore the API:** Swagger UI is available at `http://localhost:8080/swagger-ui.html` (raw spec at `/v3/api-docs`).
 
-5. **Check service health:** `http://localhost:8080/actuator/health` reports overall status plus a DB connectivity check; `/actuator/info` is exposed but currently empty (no build-info plugin configured).
+6. **Check service health:** `http://localhost:8080/actuator/health` reports overall status plus a DB connectivity check; `/actuator/info` is exposed but currently empty (no build-info plugin configured).
+
+## Authentication
+
+Every endpoint under `/api/v1/urls/**` (create, get metadata, update, stats) requires HTTP Basic Auth with the admin account configured in Setup. `GET /api/v1/{shortCode}` (the redirect) is deliberately public — a URL shortener has to work for anonymous visitors clicking the link, unlike managing the links themselves. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for why Basic Auth was chosen over JWT/OAuth.
+
+```bash
+# Admin-only — requires credentials
+curl -u admin:admin123 -X POST http://localhost:8080/api/v1/urls \
+  -H "Content-Type: application/json" \
+  -d '{"originalUrl": "https://example.com"}'
+
+# Public — no credentials needed
+curl -i http://localhost:8080/api/v1/abc12345
+```
 
 ## API Reference
 
-| Method | Path | Description | Success | Failure |
-|---|---|---|---|---|
-| `POST` | `/api/v1/urls` | Create a short URL from `{ originalUrl, customCode?, expiresAt? }` (`expiresAt` must be a future timestamp) | `201 Created` | `400` invalid URL/payload/expiresAt, `409` short code exists |
-| `GET` | `/api/v1/urls/{shortCode}` | Fetch metadata for a short code | `200 OK` | `404` not found |
-| `PATCH` | `/api/v1/urls/{shortCode}` | Partially update `{ active?, expiresAt? }` — a `null`/omitted field is left unchanged, not cleared | `200 OK` | `400` no fields provided or `expiresAt` not in the future, `404` not found |
-| `GET` | `/api/v1/{shortCode}` | Redirect to the original URL, increments click count and records a click event | `302 Found` | `404` not found or inactive, `410` link expired |
-| `GET` | `/api/v1/urls/{shortCode}/stats` | Click analytics: total clicks, first/last click timestamps, daily breakdown | `200 OK` | `404` not found |
-| `GET` | `/actuator/health` | Service + DB health check | `200 OK` (`503` if a dependency is down) | — |
+| Method | Path | Auth | Description | Success | Failure |
+|---|---|---|---|---|---|
+| `POST` | `/api/v1/urls` | `ROLE_ADMIN` | Create a short URL from `{ originalUrl, customCode?, expiresAt? }` (`expiresAt` must be a future timestamp) | `201 Created` | `400` invalid URL/payload/expiresAt, `401`/`403` auth, `409` short code exists |
+| `GET` | `/api/v1/urls/{shortCode}` | `ROLE_ADMIN` | Fetch metadata for a short code | `200 OK` | `401`/`403` auth, `404` not found |
+| `PATCH` | `/api/v1/urls/{shortCode}` | `ROLE_ADMIN` | Partially update `{ active?, expiresAt? }` — a `null`/omitted field is left unchanged, not cleared | `200 OK` | `400` no fields provided or `expiresAt` not in the future, `401`/`403` auth, `404` not found |
+| `GET` | `/api/v1/{shortCode}` | Public | Redirect to the original URL, increments click count and records a click event | `302 Found` | `404` not found or inactive, `410` link expired |
+| `GET` | `/api/v1/urls/{shortCode}/stats` | `ROLE_ADMIN` | Click analytics: total clicks, first/last click timestamps, daily breakdown | `200 OK` | `401`/`403` auth, `404` not found |
+| `GET` | `/actuator/health` | Public | Service + DB health check | `200 OK` (`503` if a dependency is down) | — |
 
 All `/api/v1/**` endpoints are also rate-limited per client IP (default: 30 requests/minute); an excess request gets `429 Too Many Requests` with the standard `ApiError` body.
 
@@ -97,7 +114,7 @@ mvn test
 The `pom.xml` Surefire config sets `-Dnet.bytebuddy.experimental=true`, letting Byte Buddy attempt best-effort support for a JDK it hasn't officially validated against. This only matters for local runs on a very new JDK — CI pins JDK 21 via `actions/setup-java` and is unaffected either way.
 
 Current coverage (`src/test/java`):
-- `UrlShortenerControllerTest` — endpoint-level request/response behavior, including the click-stats endpoint
+- `UrlShortenerControllerTest` — endpoint-level request/response behavior for the admin-gated endpoints (create, metadata, update, stats)
 - `UrlShortenerServiceImplTest` — short-code generation and collision retry, duplicate handling (including a save-time race for both generated and custom codes), redirect/click-count logic, expiration enforcement, and stats aggregation
 - `UrlValidatorTest` — URL normalization/validation rules
 - `ShortUrlRepositoryTest` / `ClickAnalyticsRepositoryTest` — persistence layer contracts
@@ -106,8 +123,11 @@ Current coverage (`src/test/java`):
 - `FixedWindowRateLimiterTest` / `RateLimitFilterTest` — window limit/reset behavior (via an injectable `Clock`, not real sleeps) and the filter's pass-through/`429` responses per client IP
 - `ClickAnalyticsRecorderTest` — verifies what gets saved (parsed browser name, referrer); run directly rather than through Spring, so it exercises the business logic, not the actual async dispatch (see Not yet covered)
 - `ApiErrorControllerTest` — verifies the `/error` fallback maps Spring's error attributes (status, path, message) into the same `ApiError` shape as every other endpoint, including sensible defaults when an attribute is missing
+- `SecurityConfigTest` — the password encoder round-trips, and the in-memory admin user is registered with the configured username, a correctly-encoded password, and `ROLE_ADMIN`
+- `UrlShortenerControllerTest` — every admin endpoint runs as `@WithMockUser(roles = "ADMIN")` by default, plus two dedicated negative tests: `401` with no authentication (`@WithAnonymousUser`), `403` authenticated as a non-admin role
+- `RedirectControllerTest` — goes through real MockMvc dispatch (not manual controller instantiation, unlike the old version of this test) with no mock authentication at all; a passing `302`/`404` here is itself proof the endpoint is genuinely public, since a wrong `SecurityConfig` matcher would surface as `401`
 
-**Not yet covered:** an actual concurrent-load test hitting a real MySQL instance to prove the retry-on-collision path under real contention (the race is unit-tested by simulating the exception, not reproduced with real concurrent threads/connections), the daily-breakdown JPQL query against a real MySQL instance (verified logically, not with an integration test against a live database), that `@Async` actually dispatches `recordClick` onto a different thread in a running Spring context (a `@SpringBootTest` with real thread-pool timing would be needed; skipped here as disproportionate for a prototype), that a real request to a genuinely unmapped path actually reaches `ApiErrorController` through the full servlet container `/error` forwarding pipeline (`ApiErrorControllerTest` calls the controller method directly with attributes it constructs itself, not through a live `DispatcherServlet`) — in practice this path is rarely exercised anyway, since `handleNoResourceFound` intercepts the common case first, load/performance testing.
+**Not yet covered:** an actual concurrent-load test hitting a real MySQL instance to prove the retry-on-collision path under real contention (the race is unit-tested by simulating the exception, not reproduced with real concurrent threads/connections), the daily-breakdown JPQL query against a real MySQL instance (verified logically, not with an integration test against a live database), that `@Async` actually dispatches `recordClick` onto a different thread in a running Spring context (a `@SpringBootTest` with real thread-pool timing would be needed; skipped here as disproportionate for a prototype), that a real request to a genuinely unmapped path actually reaches `ApiErrorController` through the full servlet container `/error` forwarding pipeline (`ApiErrorControllerTest` calls the controller method directly with attributes it constructs itself, not through a live `DispatcherServlet`) — in practice this path is rarely exercised anyway, since `handleNoResourceFound` intercepts the common case first, an end-to-end Basic Auth round-trip with real (not mocked) `HttpSecurity` wiring against a live server — the `@WebMvcTest` slices import `SecurityConfig` directly and verify authorization decisions, but not the full `spring-boot:run` startup path, load/performance testing.
 
 ## Continuous Integration
 
@@ -131,7 +151,10 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 - **No caching, no retry/circuit-breaker behavior.** (Actuator health/info endpoints, rate limiting, and async click recording are implemented — see Features.)
 - **`PATCH /api/v1/urls/{shortCode}` can't clear an already-set `expiresAt`** — a `null`/omitted `expiresAt` in the request means "leave unchanged," so once a link has an expiration, this endpoint has no way to remove it again (Jackson can't distinguish an omitted field from an explicit `null` in a record without extra tooling, so one convention had to be picked; "unchanged" matches typical PATCH semantics). Would need a dedicated action (e.g. a query param or separate endpoint) to support clearing it.
 - **No list or delete endpoints** — `active`/`expiresAt` can be updated (including deactivating a link), but there's still no way to enumerate all short URLs or permanently remove one.
-- **No auth/ownership model** — any client can create/read any short URL.
+- **Single hardcoded admin account, not a user store** — `SecurityConfig` registers exactly one `InMemoryUserDetailsManager` user from `ADMIN_USERNAME`/`ADMIN_PASSWORD` (same env-var-with-local-dev-default pattern as the DB credentials, and the same residual caveat: a placeholder default is still committed). There's no way to add a second admin, no per-user accounts, no password rotation, and no account lockout after repeated failed attempts — appropriate for "prove role-gating works," not for anything with more than one operator.
+- **Basic Auth sends credentials on every request** — base64-encoded, not encrypted; safe only over HTTPS. This app doesn't terminate or enforce TLS itself (that's normally a reverse-proxy/load-balancer concern), so there's no local safeguard against Basic Auth credentials going out in the clear if someone hits the app directly over plain HTTP outside local dev.
+- **`RateLimitFilter` doesn't see requests Spring Security rejects** — Spring Security's filter chain runs before `RateLimitFilter` in the servlet filter order (Security's default order is well ahead of the `1` this custom filter registers at), so a failed-auth request to an admin endpoint is rejected with `401`/`403` before ever reaching the rate limiter. Practically: repeated bad-credential attempts against `/api/v1/urls/**` aren't counted against that IP's quota, and Spring Security itself has no built-in lockout either — brute-forcing the admin password isn't rate-limited by anything in this app today.
+- **No auth/ownership model beyond a single admin role** — the admin can create/read/update *any* short URL; there's no concept of "this link belongs to this user."
 - **CI covers build + test only** — no static analysis/linting or dependency-CVE scanning beyond Dependabot's alerts is wired in yet (see Continuous Integration above).
 - **`ApiErrorController` (the `/error`-based fallback) is rarely what actually runs for an unmapped path** — it was the first fix attempted for this, but a `GET`/`HEAD` to an unmapped path throws `NoResourceFoundException` through the normal controller-advice flow (Spring Framework 6.1+), which `GlobalExceptionHandler.handleNoResourceFound` catches directly, before `/error` ever gets involved. `ApiErrorController`'s message (Spring Boot's own generic wording, e.g. "No static resource ...") only shows up for whatever narrower case still reaches `/error` — the common case gets a purpose-written "No endpoint found for GET /path" message instead.
 

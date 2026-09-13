@@ -10,7 +10,6 @@ import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -21,11 +20,16 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.servlet.view.RedirectView;
 
+/**
+ * Every endpoint here requires ROLE_ADMIN (see SecurityConfig, matcher
+ * /api/v1/urls/**) — creating, reading metadata, updating, and viewing
+ * stats are all management operations, unlike the public redirect in
+ * RedirectController.
+ */
 @RestController
 @RequestMapping("/api/v1")
-@Tag(name = "URL Shortener", description = "Create and resolve short URLs")
+@Tag(name = "URL Shortener", description = "Create, update, and inspect short URLs (admin-only)")
 public class UrlShortenerController {
 
     private final UrlShortenerService urlShortenerService;
@@ -34,10 +38,12 @@ public class UrlShortenerController {
         this.urlShortenerService = urlShortenerService;
     }
 
-    @Operation(summary = "Create a short URL", description = "Creates a shortened URL for a valid absolute URL. Optionally accepts a future expiresAt timestamp after which the link stops redirecting.")
+    @Operation(summary = "Create a short URL", description = "Creates a shortened URL for a valid absolute URL. Optionally accepts a future expiresAt timestamp after which the link stops redirecting. Requires ROLE_ADMIN.")
     @ApiResponses(value = {
         @ApiResponse(responseCode = "201", description = "Short URL created successfully"),
         @ApiResponse(responseCode = "400", description = "Invalid URL or payload"),
+        @ApiResponse(responseCode = "401", description = "Missing or invalid credentials"),
+        @ApiResponse(responseCode = "403", description = "Authenticated but not an admin"),
         @ApiResponse(responseCode = "409", description = "Short code already exists")
     })
     @PostMapping("/urls")
@@ -46,9 +52,11 @@ public class UrlShortenerController {
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
-    @Operation(summary = "Get short URL metadata", description = "Fetches details of a shortened URL by its code.")
+    @Operation(summary = "Get short URL metadata", description = "Fetches details of a shortened URL by its code. Requires ROLE_ADMIN.")
     @ApiResponses(value = {
         @ApiResponse(responseCode = "200", description = "Short URL found"),
+        @ApiResponse(responseCode = "401", description = "Missing or invalid credentials"),
+        @ApiResponse(responseCode = "403", description = "Authenticated but not an admin"),
         @ApiResponse(responseCode = "404", description = "Short URL not found")
     })
     @GetMapping("/urls/{shortCode}")
@@ -58,10 +66,12 @@ public class UrlShortenerController {
         return ResponseEntity.ok(urlShortenerService.getShortUrlByCode(shortCode));
     }
 
-    @Operation(summary = "Update active status and/or expiration", description = "Partially updates a short URL's active flag and/or expiresAt. A null field is left unchanged (not cleared) — provide at least one of active/expiresAt. Note: an already-set expiresAt cannot be cleared back to null through this endpoint.")
+    @Operation(summary = "Update active status and/or expiration", description = "Partially updates a short URL's active flag and/or expiresAt. A null field is left unchanged (not cleared) — provide at least one of active/expiresAt. Note: an already-set expiresAt cannot be cleared back to null through this endpoint. Requires ROLE_ADMIN.")
     @ApiResponses(value = {
         @ApiResponse(responseCode = "200", description = "Updated successfully"),
         @ApiResponse(responseCode = "400", description = "No fields provided, or expiresAt not in the future"),
+        @ApiResponse(responseCode = "401", description = "Missing or invalid credentials"),
+        @ApiResponse(responseCode = "403", description = "Authenticated but not an admin"),
         @ApiResponse(responseCode = "404", description = "Short URL not found")
     })
     @PatchMapping("/urls/{shortCode}")
@@ -72,30 +82,11 @@ public class UrlShortenerController {
         return ResponseEntity.ok(urlShortenerService.updateShortUrl(shortCode, request));
     }
 
-    @Operation(summary = "Redirect to original URL", description = "Redirects users to the original URL using the short code. Uses a 302 (not 301) so browsers re-request the redirect on every click instead of caching it, which would otherwise cause click counts to be undercounted.")
-    @ApiResponses(value = {
-        @ApiResponse(responseCode = "302", description = "Redirected successfully"),
-        @ApiResponse(responseCode = "404", description = "Short URL not found or inactive"),
-        @ApiResponse(responseCode = "410", description = "Short URL has expired")
-    })
-    @GetMapping("/{shortCode}")
-    public RedirectView redirect(
-        @Parameter(description = "Short code generated for the original URL", example = "abc12345")
-        @PathVariable String shortCode,
-        HttpServletRequest request) {
-        String originalUrl = urlShortenerService.redirectToOriginalUrl(
-            shortCode,
-            request.getHeader("Referer"),
-            request.getHeader("User-Agent")
-        );
-        RedirectView redirectView = new RedirectView(originalUrl);
-        redirectView.setStatusCode(HttpStatus.FOUND);
-        return redirectView;
-    }
-
-    @Operation(summary = "Get click analytics", description = "Returns click statistics for a shortened URL, including a daily click breakdown.")
+    @Operation(summary = "Get click analytics", description = "Returns click statistics for a shortened URL, including a daily click breakdown. Requires ROLE_ADMIN.")
     @ApiResponses(value = {
         @ApiResponse(responseCode = "200", description = "Stats found"),
+        @ApiResponse(responseCode = "401", description = "Missing or invalid credentials"),
+        @ApiResponse(responseCode = "403", description = "Authenticated but not an admin"),
         @ApiResponse(responseCode = "404", description = "Short URL not found")
     })
     @GetMapping("/urls/{shortCode}/stats")

@@ -1,6 +1,7 @@
 package com.urlshortener.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.urlshortener.config.SecurityConfig;
 import com.urlshortener.dto.ClickStatsResponse;
 import com.urlshortener.dto.CreateShortUrlRequest;
 import com.urlshortener.dto.DailyClickCount;
@@ -12,19 +13,16 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
-import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
-import org.springframework.mock.web.MockHttpServletRequest;
-import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.security.test.context.support.WithAnonymousUser;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.web.servlet.view.RedirectView;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
@@ -35,7 +33,15 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * @WithMockUser(roles = "ADMIN") at the class level authenticates every test
+ * as an admin by default, matching what every endpoint here requires
+ * (SecurityConfig gates /api/v1/urls/** behind ROLE_ADMIN). The two
+ * unauthenticated/unauthorized tests below override that per-method.
+ */
 @WebMvcTest(UrlShortenerController.class)
+@Import(SecurityConfig.class)
+@WithMockUser(roles = "ADMIN")
 class UrlShortenerControllerTest {
 
     @Autowired
@@ -62,6 +68,28 @@ class UrlShortenerControllerTest {
             .andExpect(jsonPath("$.originalUrl").value("https://example.com"));
 
         verify(urlShortenerService).createShortUrl(any(CreateShortUrlRequest.class));
+    }
+
+    @Test
+    @WithAnonymousUser
+    void createShortUrl_shouldReturnUnauthorized_whenNotAuthenticated() throws Exception {
+        CreateShortUrlRequest request = new CreateShortUrlRequest("https://example.com", "abc12345");
+
+        mockMvc.perform(post("/api/v1/urls")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(request)))
+            .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    @WithMockUser(roles = "USER")
+    void createShortUrl_shouldReturnForbidden_whenAuthenticatedWithoutAdminRole() throws Exception {
+        CreateShortUrlRequest request = new CreateShortUrlRequest("https://example.com", "abc12345");
+
+        mockMvc.perform(post("/api/v1/urls")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(request)))
+            .andExpect(status().isForbidden());
     }
 
     @Test
@@ -114,25 +142,6 @@ class UrlShortenerControllerTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isNotFound());
-    }
-
-    @Test
-    void redirect_shouldReturnNonCacheableRedirect() throws Exception {
-        UrlShortenerController controller = new UrlShortenerController(urlShortenerService);
-        MockHttpServletRequest incomingRequest = new MockHttpServletRequest();
-        incomingRequest.addHeader("Referer", "https://ref.example");
-        incomingRequest.addHeader("User-Agent", "test-agent");
-
-        when(urlShortenerService.redirectToOriginalUrl("xyz987", "https://ref.example", "test-agent"))
-            .thenReturn("https://example.org");
-
-        RedirectView view = controller.redirect("xyz987", incomingRequest);
-        MockHttpServletResponse response = new MockHttpServletResponse();
-
-        view.render(Map.of(), incomingRequest, response);
-
-        assertEquals("https://example.org", response.getHeader("Location"));
-        assertEquals(HttpServletResponse.SC_FOUND, response.getStatus());
     }
 
     @Test
