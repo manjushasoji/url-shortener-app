@@ -18,6 +18,7 @@ This is not a list of "AI wrote code, human clicked merge." It's specifically th
 | 8 | A literal, ambiguous request ("4XX error for wrong url") | Asked which of 3 readings was meant before writing code | Implementation matched the selected reading, not a guess |
 | 9 | A request to "add security" with unspecified shape | Directed specific architecture: split the redirect endpoint out, admin-only elsewhere | Built exactly that shape, not an AI-chosen alternative |
 | 10 | Engineer's own `mvnw` wrapper files, committed directly | AI reviewed them before building on top, found a real bug (missing executable bit) | Fixed and wired into CI/docs, credited as the engineer's addition |
+| 11 | A design explanation claiming a cached `expiresAt` could let an expired link keep redirecting | Precisely disproved with the actual field semantics, before any code was written | Correction identified the real risk (`active`, not `expiresAt`); implementation and `@CacheEvict` placement built around the corrected understanding |
 
 ## Detail
 
@@ -88,6 +89,16 @@ This specified the shape of the solution directly (which endpoint stays public, 
 **AI-reviewed:** Before building anything on top, checked `git ls-files -s mvnw` and found it committed as mode `100644` — not executable — which would fail with "Permission denied" running `./mvnw` on Linux/macOS, including this project's own GitHub Actions runner. This wasn't a hypothetical: it's the kind of bug that only surfaces at the exact moment someone tries to run the script.
 
 **Correction:** Fixed the executable bit via `git update-index --chmod=+x`, and wired `ci.yml`/README to actually use the wrapper (previously it existed but nothing invoked it, including CI). [build/add-maven-wrapper (PR #22)](https://github.com/manjushasoji/url-shortener-app/pull/22). Oversight in this project ran in both directions — this is the one instance where the AI caught a defect in engineer-authored input rather than the other way around.
+
+### 11. Caching design: a flawed staleness claim, caught before any code was written
+
+**Generated:** While explaining the difficulty of adding a redirect-lookup cache, the AI claimed that caching the `expiresAt` timestamp would let an already-expired link keep redirecting: *"A redirect request at 2:01pm would hit the cache, get the stale 'still fine' snapshot, and incorrectly redirect a link that should now be 410 Gone."*
+
+**Caught:** The engineer asked "why?" and then, on seeing the reasoning spelled out, disproved it directly with the actual field semantics: *"At 2.01 the expiresAt column value is still 2.00pm so it will not redirect. rt?"* This was correct — the stored `expiresAt` value doesn't change at 2:00pm just because that time has passed; only a live comparison against `now()` can determine expiry, and that comparison runs fresh on every request regardless of whether the surrounding data came from cache.
+
+**Correction:** Acknowledged the error and corrected the design: caching the raw `expiresAt` timestamp is safe, because `redirectToOriginalUrl` re-evaluates it against `LocalDateTime.now()` on every call — caching never freezes that comparison. The actual risk is the `active` flag, which (unlike `expiresAt`) only changes value via an explicit write, so a cached "active" snapshot really can go stale. The engineer then directed the fix for that real risk: *"Only Patch can update active flag, so on Patch calling cacheEvit will solve the problem rt?"* — confirmed correct, with two caveats surfaced back: `@CacheEvict` only clears the local instance's cache (the same per-instance-state limitation already accepted for the rate limiter), and the fix assumes PATCH remains the only write path for `active`/`expiresAt`.
+
+**Result:** `CachedShortUrl` caches the raw `expiresAt` (per the corrected understanding) and deliberately excludes `click_count`; `updateShortUrl` carries `@CacheEvict(value = "shortUrls", key = "#shortCode")` as the mechanism relied on for `active`. Unlike items 1–6 above, nothing here was ever committed in a wrong state — the flaw was caught in the design conversation itself, before the first line of caching code was written. [feature/add-redirect-cache (PR #26)](https://github.com/manjushasoji/url-shortener-app/pull/26).
 
 ## What This Log Doesn't Cover
 

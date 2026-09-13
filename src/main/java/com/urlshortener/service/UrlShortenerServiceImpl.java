@@ -13,6 +13,7 @@ import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.repository.ClickAnalyticsRepository;
 import com.urlshortener.repository.ShortUrlRepository;
 import com.urlshortener.util.UrlValidator;
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,15 +32,18 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
     private final ShortUrlRepository shortUrlRepository;
     private final ClickAnalyticsRepository clickAnalyticsRepository;
     private final ClickAnalyticsRecorder clickAnalyticsRecorder;
+    private final ShortUrlCache shortUrlCache;
     private final SecureRandom random = new SecureRandom();
 
     public UrlShortenerServiceImpl(
         ShortUrlRepository shortUrlRepository,
         ClickAnalyticsRepository clickAnalyticsRepository,
-        ClickAnalyticsRecorder clickAnalyticsRecorder) {
+        ClickAnalyticsRecorder clickAnalyticsRecorder,
+        ShortUrlCache shortUrlCache) {
         this.shortUrlRepository = shortUrlRepository;
         this.clickAnalyticsRepository = clickAnalyticsRepository;
         this.clickAnalyticsRecorder = clickAnalyticsRecorder;
+        this.shortUrlCache = shortUrlCache;
     }
 
     @Override
@@ -103,8 +107,16 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
         return toResponse(entity);
     }
 
+    /*
+     * @CacheEvict here is what keeps ShortUrlCache correct: active/expiresAt
+     * only ever change through this method, so evicting the entry for this
+     * shortCode on every update means the next redirect always sees fresh
+     * data. This only clears the cache on whichever instance handles the
+     * request, though — see CacheConfig for the multi-instance caveat.
+     */
     @Override
     @Transactional
+    @CacheEvict(value = "shortUrls", key = "#shortCode")
     public ShortUrlResponse updateShortUrl(String shortCode, UpdateShortUrlRequest request) {
         if (request.active() == null && request.expiresAt() == null) {
             throw new InvalidUpdateRequestException("At least one of active or expiresAt must be provided");
@@ -123,25 +135,31 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
         return toResponse(shortUrlRepository.save(entity));
     }
 
+    /*
+     * The expiry check re-evaluates CachedShortUrl.expiresAt() against
+     * LocalDateTime.now() on every call, so a cached (but unchanged) timestamp
+     * never goes stale here — only the mutable `active` flag needs the
+     * @CacheEvict above to stay correct. click_count is deliberately never
+     * part of the cached data: it's incremented with a direct, always-executed
+     * UPDATE (incrementClickCount), never read from or written into the cache.
+     */
     @Override
     @Transactional
     public String redirectToOriginalUrl(String shortCode, String referrer, String userAgent) {
-        ShortUrl entity = shortUrlRepository.findByShortCode(shortCode)
-            .orElseThrow(() -> new ResourceNotFoundException("Short URL not found for code: " + shortCode));
+        CachedShortUrl cached = shortUrlCache.lookupForRedirect(shortCode);
 
-        if (!entity.isActive()) {
+        if (!cached.active()) {
             throw new ResourceNotFoundException("Short URL is inactive: " + shortCode);
         }
 
-        if (entity.getExpiresAt() != null && entity.getExpiresAt().isBefore(LocalDateTime.now())) {
+        if (cached.expiresAt() != null && cached.expiresAt().isBefore(LocalDateTime.now())) {
             throw new UrlExpiredException("Short URL has expired: " + shortCode);
         }
 
-        entity.setClickCount((entity.getClickCount() == null ? 0L : entity.getClickCount()) + 1L);
-        shortUrlRepository.save(entity);
-        clickAnalyticsRecorder.recordClick(entity.getId(), referrer, userAgent);
+        shortUrlRepository.incrementClickCount(cached.id());
+        clickAnalyticsRecorder.recordClick(cached.id(), referrer, userAgent);
 
-        return entity.getOriginalUrl();
+        return cached.originalUrl();
     }
 
     @Override

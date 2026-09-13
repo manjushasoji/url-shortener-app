@@ -47,23 +47,29 @@ Client
 │  - generates an 8-char random short code, or normalizes a   │
 │    caller-supplied custom code                              │
 │  - enforces short-code uniqueness before persisting          │
-│  - increments click_count on redirect, delegates click_     │
-│    analytics recording to ClickAnalyticsRecorder (async)     │
+│  - on redirect: reads via ShortUrlCache (cached), increments │
+│    click_count via a direct uncached UPDATE, delegates       │
+│    click_analytics recording to ClickAnalyticsRecorder(async)│
+│  - on update: evicts ShortUrlCache for that shortCode         │
 │  - aggregates click_analytics into per-link stats            │
 │  - maps entities <-> response DTOs                          │
 └───────────────────────────────────────────────────────────┘
-                    │                        │ (async, different thread)
-                    ▼                        ▼
-┌─────────────────────────┐   ┌───────────────────────────────┐
-│ ShortUrlRepository       │   │ ClickAnalyticsRecorder          │
-│  - findByShortCode /     │   │ (interface, mockable as a JDK   │
-│    existsByShortCode     │   │ proxy) / ClickAnalyticsRecorder │
-└─────────────────────────┘   │ Impl (@Async) — parses browser  │
-                    │          │ name (UserAgentParser), saves    │
-                    │          │ a click_analytics row            │
-                    │          └───────────────────────────────┘
-                    │                        │
-                    ▼                        ▼
+              │                    │                    │ (async, different thread)
+              ▼                    ▼                    ▼
+┌──────────────────────┐ ┌──────────────────────┐ ┌──────────────────────────┐
+│ ShortUrlRepository     │ │ ShortUrlCache          │ │ ClickAnalyticsRecorder     │
+│  - findByShortCode /   │ │ (interface) /          │ │ (interface, mockable as a │
+│    existsByShortCode   │ │ ShortUrlCacheImpl       │ │ JDK proxy) /               │
+│  - incrementClickCount │ │ (@Cacheable) — on a     │ │ ClickAnalyticsRecorderImpl │
+│    (atomic UPDATE,     │ │ miss, reads             │ │ (@Async) — parses browser  │
+│    never cached)       │ │ ShortUrlRepository and   │ │ name (UserAgentParser),    │
+│                        │ │ caches an immutable      │ │ saves a click_analytics    │
+│                        │ │ CachedShortUrl snapshot  │ │ row                        │
+│                        │ │ (id/url/active/expiresAt │ │                            │
+│                        │ │ — never clickCount)      │ │                            │
+└──────────────────────┘ └──────────────────────┘ └──────────────────────────┘
+              │                    │ (miss only)                    │
+              ▼                    ▼                                ▼
         MySQL: short_url table            click_analytics table
    (unique index on short_code,      (indexed on short_url_id and
        index on active)                       clicked_at)
@@ -81,6 +87,7 @@ Cross-cutting:
 - **`SecurityConfig`** — HTTP Basic Auth, `ROLE_ADMIN` required for `/api/v1/urls/**`, everything else (including the redirect) public. See Key Design Decisions for why Basic Auth over JWT, why a single in-memory user, and how this interacts with `RateLimitFilter`.
 - **`ApiErrorController`** (implements `ErrorController`, mapped to `/error`) — handles everything that reaches Spring Boot's `/error` forwarding *without* going through `@RestControllerAdvice`, which in practice means every Spring Security rejection (`401`/`403`, dispatched via `response.sendError()`) plus non-`GET`/`HEAD` unmapped paths. Despite the name, this is not a rare corner case: it runs on every unauthenticated request to an admin endpoint — see Key Design Decisions for a real bug this caused (a `401` silently reported as `500`) and how it was fixed.
 - **`AsyncConfig`** (`@EnableAsync` + `AsyncConfigurer`) — provides the bounded thread pool `@Async` methods run on, and logs (rather than silently swallows) any exception an async method throws.
+- **`CacheConfig`** (`@EnableCaching` + a `CacheManagerCustomizer<CaffeineCacheManager>`) — configures the single `shortUrls` cache backing `ShortUrlCache` (5-minute TTL, 10,000-entry cap). See Key Design Decisions for what is and isn't cached, and why.
 
 ## 2. Tools
 
@@ -89,6 +96,7 @@ Cross-cutting:
 - **springdoc-openapi** — generates the OpenAPI spec and Swagger UI from controller annotations.
 - **Spring Boot Actuator** — exposes `/actuator/health` (with a DB connectivity check) and `/actuator/info` for operational visibility.
 - **Spring Security** — HTTP Basic Auth, one in-memory admin user, `ROLE_ADMIN`-gated management endpoints. `spring-security-test` provides `@WithMockUser`/`@WithAnonymousUser` for the `@WebMvcTest` slices.
+- **Spring Cache + Caffeine** — in-memory caching for the redirect lookup only; see `CacheConfig`/`ShortUrlCache` above and the caching bullets in Key Design Decisions.
 - **JUnit 5 / Spring Boot Test** — unit and slice tests per layer. Surefire runs with `-Dnet.bytebuddy.experimental=true` so `mvn test` still works on a JDK newer than the bundled Mockito/Byte Buddy officially supports (relevant for local dev on a bleeding-edge JDK; CI's pinned JDK 21 doesn't need it).
 - **GitHub Actions** (`.github/workflows/ci.yml`) — runs the test suite against a real MySQL service container on every push/PR to `main`. **Dependabot** (`.github/dependabot.yml`) — weekly PRs for outdated/vulnerable Maven and Actions dependencies.
 - **Maven Wrapper** (`mvnw` / `mvnw.cmd`, `.mvn/wrapper/maven-wrapper.properties`, `wrapperVersion=3.3.4`, `distributionUrl` pinned to Maven `3.9.16`) — no local Maven install needed; `./mvnw`/`mvnw.cmd` download and run the pinned version themselves. CI uses the same wrapper invocation, so local dev and CI are guaranteed to run the identical Maven version — closing off one more axis of the environment drift that caused real problems earlier in this project (see Key Design Decisions). `mvnw` needs its executable bit set in git (`100755`) to run on Linux/macOS without an explicit `chmod +x` first; this was initially committed as `100644` and had to be corrected.
@@ -102,7 +110,7 @@ Cross-cutting:
 | `id` | BIGINT, PK, identity | |
 | `short_code` | VARCHAR(20), unique, indexed | auto-generated (8 random alphanumeric chars) or caller-supplied |
 | `original_url` | VARCHAR(2048) | validated as an absolute `http(s)` URL before storage |
-| `click_count` | BIGINT, default 0 | incremented on each successful redirect |
+| `click_count` | BIGINT, default 0 | incremented on each successful redirect via a direct atomic `UPDATE` (`ShortUrlRepository.incrementClickCount`) — deliberately never part of `ShortUrlCache`'s cached data, and never read from the cache either; see Key Design Decisions |
 | `active` | BOOLEAN, default true, indexed | settable via `PATCH /api/v1/urls/{shortCode}` (`{ "active": false }` deactivates a link; enforced on redirect — see Control Flow) |
 | `created_at` | TIMESTAMP | set via `@PrePersist` |
 | `expires_at` | TIMESTAMP, nullable | optionally set from `CreateShortUrlRequest.expiresAt` (must be a future timestamp, validated via `@Future`); enforced on redirect — see Control Flow |
@@ -133,16 +141,16 @@ Cross-cutting:
 2. Service rejects the request with `400` (`InvalidUpdateRequestException`) if both `active` and `expiresAt` are `null` — before even looking up the entity, so a no-op request never touches the database.
 3. Looks up the entity; `404` if absent.
 4. Applies only the non-null fields: `active` if provided, `expiresAt` if provided. A `null` field is left as-is, not cleared — see Key Design Decisions for why, and Known Limitations in the README for what that means for clearing an existing `expiresAt`.
-5. Saves and returns `200` with the updated `ShortUrlResponse`.
+5. Saves, evicts `ShortUrlCache`'s entry for this `shortCode` (`@CacheEvict`, so the next redirect sees the change immediately — on this instance; see Known Limitations for the multi-instance caveat), and returns `200` with the updated `ShortUrlResponse`.
 
 **Redirect (`GET /api/v1/{shortCode}`, `RedirectController`):**
 0. `SecurityConfig` permits this path with no authentication — see Key Design Decisions for why the redirect stays public while everything else doesn't. `RateLimitFilter` still applies the same per-IP check as on create (same filter, same `/api/v1/*` mapping) — rate limiting isn't auth-gated.
 1. Controller reads the `Referer` and `User-Agent` headers off the incoming request.
-2. Service looks up the entity by short code; `404` via `ResourceNotFoundException` if absent.
-3. If `active` is `false`, also `404`s (settable via `PATCH /api/v1/urls/{shortCode}` — see above).
-4. If `expires_at` is set and is in the past, throws `UrlExpiredException` → `410 Gone`.
-5. Click count is incremented and saved (still on the request thread — this part stays synchronous, since a lost click count would be visibly wrong on the next metadata fetch). `ClickAnalyticsRecorder.recordClick` is then called, which dispatches to a background thread pool (`@Async`) that parses the browser name (`UserAgentParser`) and writes the `click_analytics` row — the request thread does not wait for this to finish.
-6. Controller issues a `302` redirect to `original_url`, which returns as soon as step 5's synchronous part completes — it does not wait on the async analytics write. *(Deliberately not `301` — see Key Design Decisions: a 301 would let browsers cache the redirect and skip the server on repeat clicks, undercounting `click_count`/`click_analytics`.)*
+2. Service calls `ShortUrlCache.lookupForRedirect(shortCode)`. On a cache hit, this returns instantly with no database access. On a miss, `ShortUrlCacheImpl` queries `ShortUrlRepository.findByShortCode`, throws `ResourceNotFoundException` (→ `404`) if absent — and, since `@Cacheable` only stores a value on normal return, that "not found" result is never itself cached — or maps the entity into an immutable `CachedShortUrl(id, originalUrl, active, expiresAt)` and caches *that*, not the JPA entity.
+3. If `active` is `false`, `404`s (settable via `PATCH /api/v1/urls/{shortCode}` — see above; a stale cached `true` here is exactly what `@CacheEvict` on that endpoint exists to prevent).
+4. If `expiresAt` is set and is in the past, throws `UrlExpiredException` → `410 Gone`. This comparison is always against `LocalDateTime.now()` at request time, so a cached (but unchanged) `expiresAt` value never itself goes stale — only `active`, a value that actually gets mutated by a write, needs the cache eviction; see Key Design Decisions.
+5. `ShortUrlRepository.incrementClickCount(cached.id())` runs as a direct atomic `UPDATE ... SET click_count = click_count + 1` — always executed, cache hit or miss, and never itself cached, so a lost or duplicated increment isn't possible in the way a naive load-then-cache-the-whole-entity design would risk. `ClickAnalyticsRecorder.recordClick` is then called, dispatching to a background thread pool (`@Async`) that parses the browser name and writes the `click_analytics` row — the request thread doesn't wait for this to finish.
+6. Controller issues a `302` redirect to `originalUrl`, returning as soon as step 5's synchronous part (the click-count update) completes — it does not wait on the async analytics write. *(Deliberately not `301` — see Key Design Decisions: a 301 would let browsers cache the redirect and skip the server on repeat clicks, undercounting `click_count`/`click_analytics`.)*
 
 **Click stats (`GET /api/v1/urls/{shortCode}/stats`):**
 0. Same `SecurityConfig` (`ROLE_ADMIN`) and `RateLimitFilter` checks as create.
@@ -174,6 +182,10 @@ Cross-cutting:
 - **HTTP Basic Auth with a single in-memory admin, not JWT/OAuth**: satisfies "only an admin can do X" with infrastructure Spring Security provides out of the box — no token issuance endpoint, no expiry/refresh logic, no secret-signing-key management to get right. Trade-off: Basic Auth re-sends credentials on every request (base64, not encrypted — safe only over HTTPS, which this app doesn't enforce itself) and has no session/logout concept; a real multi-user product would need JWT or OAuth2 plus a persisted user store. Chosen deliberately for a prototype scored on engineering judgment under real constraints: this session has no way to run the app and verify a token flow actually works end to end, whereas Basic Auth's behavior is fully specified and testable with a plain `curl -u`.
 - **Security matcher order: `/api/v1/urls/**` (admin) declared before `GET /api/v1/*` (public), not after**: `authorizeHttpRequests` matches top-to-bottom and stops at the first hit — it is not "most specific pattern wins" the way some routing systems work. Both patterns are structurally disjoint today (`/api/v1/urls/**` needs at least the segment `urls`; `/api/v1/*` needs exactly one segment that isn't `urls`), so the order doesn't change behavior *yet* — but listing the admin rule first means a hypothetical future single-segment-shaped endpoint under `/urls` (unlikely, but not impossible) fails safe (admin-gated) rather than silently falling through to the public rule.
 - **`RateLimitFilter` is not security-aware, and that's an accepted gap, not an oversight**: Spring Security's filter chain runs ahead of `RateLimitFilter` in servlet filter order, so a request Security rejects (`401`/`403`) never reaches the rate limiter — repeated bad-credential attempts against an admin endpoint aren't throttled by anything in this app. Reordering the filters to rate-limit *before* authentication was considered and deliberately not done: it would mean an attacker's failed attempts consume the same quota bucket as legitimate admin traffic from that IP, and getting filter-order interactions with Spring Security's own chain right is exactly the kind of change this session has no way to verify without a running instance to test against. Documented as a known limitation instead of guessed at.
+- **`ShortUrlCache` caches a small immutable projection (`CachedShortUrl`), never the JPA `ShortUrl` entity itself**: caching the mutable entity directly was considered and rejected. Two failure modes made it unsafe: Caffeine stores object references in-memory, so mutating a cached entity's `click_count` in place would silently leak the write into the cache without an explicit cache-update call — implicit, fragile behavior that would also behave *differently* under a future distributed cache (which serializes/deserializes, producing a genuinely detached copy, not a shared reference). The clean fix is structural, not a workaround: `click_count` simply isn't part of the cached data at all, so there's no mutable state in the cache to get wrong. `CachedShortUrl` carries only `id`, `originalUrl`, `active`, and `expiresAt` — everything the redirect *decision* needs, nothing the redirect *write path* (the click count) touches.
+- **`click_count` is incremented with a direct atomic `UPDATE` (`ShortUrlRepository.incrementClickCount`), replacing the previous load-entity-then-save approach**: a consequence of the cache design above rather than a goal on its own — once the redirect decision no longer loads the full entity (it reads `ShortUrlCache` instead), incrementing the count via load-modify-save would mean loading the entity a *second* time just to write one field. An atomic `UPDATE ... SET click_count = click_count + 1` avoids that reload entirely and, as a side effect, closes a latent race: the previous `entity.setClickCount(x + 1); save(entity)` pattern had no `@Version` field guarding it, so two concurrent redirects on the same popular short code could in principle read-modify-write over each other and lose an increment. The atomic form can't lose an update regardless of concurrency.
+- **`ShortUrlCache` is an interface, not a method on `UrlShortenerServiceImpl` — the same self-invocation lesson from `ClickAnalyticsRecorder`, applied proactively this time**: Spring's `@Cacheable` proxy, like `@Async`'s, only intercepts calls arriving from *outside* the bean it's declared on. Putting `@Cacheable` directly on a method that `redirectToOriginalUrl` calls via `this.` within the same class would compile fine and silently never cache anything — no error, no warning, just a cache that never engages. Having already paid for this mistake once with `ClickAnalyticsRecorder` (see above), the interface split was done here from the start rather than discovered the same way again.
+- **A 5-minute TTL on top of `@CacheEvict`, not instead of it**: `@CacheEvict` on `updateShortUrl` is what makes the cache correct in the common case — it fires immediately on the one write path that changes `active`/`expiresAt`. The TTL exists for what eviction can't reach: on a single instance, a hypothetical future write path that bypasses `updateShortUrl`; more concretely, if this ever runs on more than one instance, `@CacheEvict` only clears the cache on the instance that handled the write, and every *other* instance would keep serving its own stale entry until that instance's own TTL independently expires. Five minutes is a judgment call (like the rate limiter's 30 req/min), not a load-tested figure — short enough to bound real-world staleness, long enough that a genuinely popular link still gets meaningfully fewer database round-trips.
 
 ## 6. Execution Approach
 
@@ -183,7 +195,9 @@ The initial implementation proceeded layer-by-layer (entity → repository → s
 
 These are scope gaps, not implementation bugs — tracked in full in the README's Known Limitations:
 - A "top links" analytics view across all URLs (per-link stats are now implemented; cross-link aggregation is not)
-- Reliability concerns: caching, retry/circuit-breaking (health checks, rate limiting, and async click recording are now implemented)
+- Reliability concerns: retry/circuit-breaking (health checks, rate limiting, async click recording, and the redirect-lookup cache are now implemented)
+- The redirect cache is in-memory/per-instance, same limitation as rate limiting — `@CacheEvict` only clears the instance that handled the write; a shared cache (Redis) would close the multi-instance gap but is out of scope here (see Key Design Decisions and Known Limitations in the README)
+- No integration test wires `UrlShortenerServiceImpl`'s `@CacheEvict` and `ShortUrlCache`'s `@Cacheable` together end to end in one live cache — each is verified independently (see Known Limitations in the README)
 - Link lifecycle management: list, delete (`active`/`expiresAt` update — including deactivation — and expiration enforcement are now implemented)
 - `PATCH /api/v1/urls/{shortCode}` cannot clear an already-set `expiresAt` back to null (see Key Design Decisions and Known Limitations in the README)
 - `ApiErrorController`'s `message` field is Spring Boot's own generic wording for the unmapped-path case (`handleNoResourceFound` intercepts that one with a purpose-written message instead) — but for security rejections, `ApiErrorController` is the actual, commonly-hit handler, not a rare fallback (see Known Limitations in the README)
