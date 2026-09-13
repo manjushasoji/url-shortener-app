@@ -12,10 +12,11 @@ A REST service for creating, resolving, and redirecting shortened URLs, built wi
 | Input validation (URL format, custom code format) | ✅ Implemented |
 | Structured error responses | ✅ Implemented |
 | OpenAPI/Swagger documentation | ✅ Implemented |
-| Link expiration enforcement | ⚠️ Schema field exists (`expires_at`), not enforced yet |
+| Link expiration (optional `expiresAt` on create, enforced on redirect) | ✅ Implemented |
 | Analytics: per-link click stats (total, first/last click, daily breakdown) | ✅ Implemented |
 | Analytics: "top links" listing across all URLs | ❌ Not implemented yet |
-| Reliability features (rate limiting, caching, health checks) | ❌ Not implemented |
+| Health checks (Spring Boot Actuator: `/actuator/health`, `/actuator/info`) | ✅ Implemented |
+| Reliability: rate limiting, caching | ❌ Not implemented |
 | List / update / delete / deactivate a short URL | ❌ Not implemented |
 | Authentication / ownership of links | ❌ Not implemented |
 
@@ -59,14 +60,17 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 
 4. **Explore the API:** Swagger UI is available at `http://localhost:8080/swagger-ui.html` (raw spec at `/v3/api-docs`).
 
+5. **Check service health:** `http://localhost:8080/actuator/health` reports overall status plus a DB connectivity check; `/actuator/info` is exposed but currently empty (no build-info plugin configured).
+
 ## API Reference
 
 | Method | Path | Description | Success | Failure |
 |---|---|---|---|---|
-| `POST` | `/api/v1/urls` | Create a short URL from `{ originalUrl, customCode? }` | `201 Created` | `400` invalid URL/payload, `409` short code exists |
+| `POST` | `/api/v1/urls` | Create a short URL from `{ originalUrl, customCode?, expiresAt? }` (`expiresAt` must be a future timestamp) | `201 Created` | `400` invalid URL/payload/expiresAt, `409` short code exists |
 | `GET` | `/api/v1/urls/{shortCode}` | Fetch metadata for a short code | `200 OK` | `404` not found |
-| `GET` | `/api/v1/{shortCode}` | Redirect to the original URL, increments click count and records a click event | `302 Found` | `404` not found or inactive |
+| `GET` | `/api/v1/{shortCode}` | Redirect to the original URL, increments click count and records a click event | `302 Found` | `404` not found or inactive, `410` link expired |
 | `GET` | `/api/v1/urls/{shortCode}/stats` | Click analytics: total clicks, first/last click timestamps, daily breakdown | `200 OK` | `404` not found |
+| `GET` | `/actuator/health` | Service + DB health check | `200 OK` (`503` if a dependency is down) | — |
 
 ## Testing
 
@@ -78,26 +82,26 @@ mvn test
 
 Current coverage (`src/test/java`):
 - `UrlShortenerControllerTest` — endpoint-level request/response behavior, including the click-stats endpoint
-- `UrlShortenerServiceImplTest` — short-code generation, duplicate handling, redirect/click-count logic, click-event recording, and stats aggregation
+- `UrlShortenerServiceImplTest` — short-code generation and collision retry, duplicate handling (including a save-time race for both generated and custom codes), redirect/click-count logic, expiration enforcement, and stats aggregation
 - `UrlValidatorTest` — URL normalization/validation rules
 - `ShortUrlRepositoryTest` / `ClickAnalyticsRepositoryTest` — persistence layer contracts
-- `GlobalExceptionHandlerTest` — error response shape per exception type
+- `GlobalExceptionHandlerTest` — error response shape per exception type, including the new `410` expired-link mapping
 
-**Not yet covered:** concurrency/race conditions on short-code creation, expiration behavior (since it isn't implemented), the daily-breakdown JPQL query against a real MySQL instance (verified logically, not with an integration test against a live database), load/performance testing.
+**Not yet covered:** an actual concurrent-load test hitting a real MySQL instance to prove the retry-on-collision path under real contention (the race is unit-tested by simulating the exception, not reproduced with real concurrent threads/connections), the daily-breakdown JPQL query against a real MySQL instance (verified logically, not with an integration test against a live database), load/performance testing.
 
 ## Known Limitations
 
 These are open gaps against the intended scope (core APIs + analytics + reliability), tracked here rather than left implicit:
 
 - **Hardcoded DB credentials** committed in `application.properties` — should move to environment variables/secrets before any shared or production use.
-- **`expires_at` is not enforced** — the column exists on `ShortUrl` but `redirectToOriginalUrl` never checks it, so expired links still redirect.
-- **Race condition on short-code creation** — `existsByShortCode` is checked, then the entity is saved, with no unique-constraint-violation handling in between; concurrent requests could still collide (the DB has a unique index as a backstop, but the app doesn't catch/retry on that constraint violation).
+- **`/actuator/health` shows full dependency details with no authentication** (`management.endpoint.health.show-details=always`) — acceptable for local/prototype use, but should be restricted (e.g. `when-authorized`, or gated behind network/auth controls) before any shared deployment, since it can reveal internal DB connectivity details to any caller.
+- **Short-code generation retries a fixed number of times (5) on collision, not indefinitely** — with an 8-character, 62-character-alphabet code space, collision odds are astronomically low, so this is a safety net rather than an expected path; if it's ever exhausted, `createShortUrl` fails with a clear `409` rather than looping forever.
 - **Click recording is synchronous** — each redirect writes a `click_analytics` row in the same request/transaction as the redirect itself, adding a write to the hot path. Planned fix: move this to an async write once the reliability work lands, so analytics recording can't slow down or fail a redirect.
 - **No "top links" analytics view** — per-link stats (`/api/v1/urls/{shortCode}/stats`) are implemented, but there's no endpoint yet to list/sort all URLs by click volume.
 - **Daily-breakdown query untested against real MySQL** — the `CAST(... AS date)` JPQL aggregation in `ClickAnalyticsRepository` is covered by mock-based unit tests only; it hasn't been run against a live database yet.
 - **`referrer` will often be null** — it's populated from the `Referer` HTTP header, which browsers only send when navigation originates from a link on another page. Direct/typed navigation, HTTPS→HTTP downgrades, and privacy-focused browsers/extensions all omit it. This is expected client behavior, not a bug — treat `referrer` as best-effort, not guaranteed data.
 - **`user_agent` stores a parsed browser name, not the raw header** — `UserAgentParser.extractBrowserName` reduces the raw `User-Agent` string down to one of `Chrome`, `Firefox`, `Safari`, `Edge`, `Opera`, `Internet Explorer`, `Other` (unrecognized client), or `Unknown` (header missing). It uses simple substring checks in a specific order (checking Edge/Opera before Chrome, since their UA strings also contain "Chrome") rather than a full parsing library, so unusual or future browser UA formats may fall into `Other`. The raw header itself is not retained.
-- **No reliability hardening** — no rate limiting, no caching, no Actuator health/readiness endpoints, no retry/circuit-breaker behavior.
+- **No reliability hardening beyond health checks** — no rate limiting, no caching, no retry/circuit-breaker behavior. (Actuator health/info endpoints are implemented — see Features.)
 - **No management endpoints** — no list, update, delete, or deactivate operations; a link can never be turned off once created.
 - **No auth/ownership model** — any client can create/read any short URL.
 - **No CI pipeline** — tests, linting, and security scanning are not automated.
