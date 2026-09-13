@@ -9,6 +9,13 @@ Client
   │  HTTP (JSON / redirect)
   ▼
 ┌───────────────────────────────────────────────────────────┐
+│ RateLimitFilter (servlet filter, /api/v1/* only)            │
+│  - per-client-IP fixed-window check; 429 short-circuits      │
+│    the request before it reaches Spring MVC on excess        │
+└───────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌───────────────────────────────────────────────────────────┐
 │ UrlShortenerController                                     │
 │  - POST /api/v1/urls               (create)                │
 │  - GET  /api/v1/urls/{code}        (metadata)               │
@@ -50,6 +57,7 @@ Client
 Cross-cutting:
 - **`GlobalExceptionHandler`** (`@RestControllerAdvice`) — maps `ResourceNotFoundException`, `InvalidUrlException`, `DuplicateShortCodeException`, `UrlExpiredException`, validation errors, and any uncaught exception to a structured `ApiError` (timestamp, status, error, message, path).
 - **`OpenApiConfig`** — exposes Swagger UI / OpenAPI spec for interactive API exploration.
+- **`RateLimitFilter`** (registered via `RateLimitConfig` on `/api/v1/*`, ahead of Spring MVC) — a per-client-IP fixed-window limiter; returns `429` with the same `ApiError` shape when exceeded, before the request reaches the controller.
 
 ## 2. Tools
 
@@ -86,6 +94,7 @@ Cross-cutting:
 ## 4. Control Flow
 
 **Create (`POST /api/v1/urls`):**
+0. `RateLimitFilter` checks the caller's IP against its per-minute quota; over the limit, responds `429` immediately without invoking the controller.
 1. Controller validates the request body (`@Valid` — `originalUrl` non-blank and matches an absolute-URL pattern; `expiresAt`, if present, must be in the future).
 2. Service re-validates/normalizes the URL via `UrlValidator` (defense in depth against the same class of input, using `java.net.URI` to require a scheme + host of `http`/`https`).
 3. If a custom code was supplied, it's lowercased and checked against `[a-zA-Z0-9-]{3,20}`, then a fast `existsByShortCode` pre-check gives an immediate `409` for the common case. If none was supplied, the service generates an 8-character random code from a 62-character alphabet (`SecureRandom`) — no pre-check, since collision odds are negligible.
@@ -93,6 +102,7 @@ Cross-cutting:
 5. Controller returns `201` with the persisted entity (including `expiresAt`, if set) mapped to `ShortUrlResponse`.
 
 **Redirect (`GET /api/v1/{shortCode}`):**
+0. `RateLimitFilter` applies the same per-IP check as on create (same filter, same `/api/v1/*` mapping).
 1. Controller reads the `Referer` and `User-Agent` headers off the incoming request.
 2. Service looks up the entity by short code; `404` via `ResourceNotFoundException` if absent.
 3. If `active` is `false`, also `404`s (though nothing in the current code ever flips `active` to `false`).
@@ -115,6 +125,7 @@ Cross-cutting:
 - **Event table (`click_analytics`) instead of only a counter**: a single `click_count` integer can't answer "clicks over time" or support a future "top links" view, so individual click events are recorded and aggregated on read. Trade-off: this is a write on every redirect (one INSERT plus the existing `click_count` UPDATE) instead of a single UPDATE — acceptable for a prototype, but the reason the README calls out making this write asynchronous as a near-term reliability follow-up.
 - **`short_url_id` stored as a plain indexed column, not a JPA `@ManyToOne`**: avoids loading/managing the `ShortUrl` association just to write an analytics row, keeping the redirect's hot path lighter at the cost of no referential-integrity enforcement — there's an index on `short_url_id` for query performance, but no actual foreign-key constraint or cascade behavior at either the entity or schema level.
 - **Hand-rolled `UserAgentParser` instead of a UA-parsing library**: the raw `User-Agent` header is a single string that packs multiple browser/engine tokens together for legacy compatibility (e.g. Chrome's UA also contains "Safari" and "AppleWebKit"), which is confusing to read directly in analytics. A small ordered set of substring checks (most-derived browsers like Edge/Opera checked before Chrome, since they also contain a "Chrome" token) covers the common desktop/mobile browsers without adding a dependency. Trade-off: it won't correctly classify less common or future browsers (they fall into `Other`), whereas a maintained library (e.g. `ua-parser`) would stay current with new UA formats at the cost of an added dependency.
+- **Hand-rolled `FixedWindowRateLimiter` (servlet filter) instead of a library like Bucket4j**: a fixed window per client IP, backed by a plain `ConcurrentHashMap`, is simple enough to review at a glance and needs zero new runtime dependencies — reasonable for a single-instance prototype. Trade-off vs. a token-bucket library: fixed windows allow a burst of up to 2x the limit right at a window boundary (e.g. 30 requests in the last second of one window, then another 30 in the first second of the next), where a token bucket smooths this out. A bigger limitation is that this is in-memory and per-instance — see Known Limitations in the README for what breaks if this ever runs behind a load balancer or across multiple instances.
 
 ## 6. Execution Approach
 
@@ -125,7 +136,8 @@ Implementation proceeded layer-by-layer (entity → repository → service → c
 These are scope gaps, not implementation bugs — tracked in full in the README's Known Limitations:
 - A "top links" analytics view across all URLs (per-link stats are now implemented; cross-link aggregation is not)
 - Async click recording — analytics writes currently happen synchronously on the redirect path
-- Reliability concerns: rate limiting, caching, retry/circuit-breaking (health checks are now implemented via Actuator)
+- Reliability concerns: caching, retry/circuit-breaking (health checks and rate limiting are now implemented)
 - Link lifecycle management: update, delete, deactivate (expiration is now implemented and enforced)
 - AuthN/AuthZ and multi-tenant ownership of links
 - `/actuator/health` detail exposure has no access control — fine for local/prototype use, not for a shared deployment
+- Rate limiting is in-memory/per-instance and keyed on the immediate TCP peer address — breaks down behind a load balancer or across multiple instances (see Known Limitations in the README)

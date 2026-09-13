@@ -16,7 +16,8 @@ A REST service for creating, resolving, and redirecting shortened URLs, built wi
 | Analytics: per-link click stats (total, first/last click, daily breakdown) | ✅ Implemented |
 | Analytics: "top links" listing across all URLs | ❌ Not implemented yet |
 | Health checks (Spring Boot Actuator: `/actuator/health`, `/actuator/info`) | ✅ Implemented |
-| Reliability: rate limiting, caching | ❌ Not implemented |
+| Reliability: per-IP rate limiting on `/api/v1/**` | ✅ Implemented |
+| Reliability: caching, async click recording | ❌ Not implemented |
 | List / update / delete / deactivate a short URL | ❌ Not implemented |
 | Authentication / ownership of links | ❌ Not implemented |
 
@@ -72,6 +73,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 | `GET` | `/api/v1/urls/{shortCode}/stats` | Click analytics: total clicks, first/last click timestamps, daily breakdown | `200 OK` | `404` not found |
 | `GET` | `/actuator/health` | Service + DB health check | `200 OK` (`503` if a dependency is down) | — |
 
+All `/api/v1/**` endpoints are also rate-limited per client IP (default: 30 requests/minute); an excess request gets `429 Too Many Requests` with the standard `ApiError` body.
+
 ## Testing
 
 Run the test suite with:
@@ -86,6 +89,7 @@ Current coverage (`src/test/java`):
 - `UrlValidatorTest` — URL normalization/validation rules
 - `ShortUrlRepositoryTest` / `ClickAnalyticsRepositoryTest` — persistence layer contracts
 - `GlobalExceptionHandlerTest` — error response shape per exception type, including the new `410` expired-link mapping
+- `FixedWindowRateLimiterTest` / `RateLimitFilterTest` — window limit/reset behavior (via an injectable `Clock`, not real sleeps) and the filter's pass-through/`429` responses per client IP
 
 **Not yet covered:** an actual concurrent-load test hitting a real MySQL instance to prove the retry-on-collision path under real contention (the race is unit-tested by simulating the exception, not reproduced with real concurrent threads/connections), the daily-breakdown JPQL query against a real MySQL instance (verified logically, not with an integration test against a live database), load/performance testing.
 
@@ -101,7 +105,8 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 - **Daily-breakdown query untested against real MySQL** — the `CAST(... AS date)` JPQL aggregation in `ClickAnalyticsRepository` is covered by mock-based unit tests only; it hasn't been run against a live database yet.
 - **`referrer` will often be null** — it's populated from the `Referer` HTTP header, which browsers only send when navigation originates from a link on another page. Direct/typed navigation, HTTPS→HTTP downgrades, and privacy-focused browsers/extensions all omit it. This is expected client behavior, not a bug — treat `referrer` as best-effort, not guaranteed data.
 - **`user_agent` stores a parsed browser name, not the raw header** — `UserAgentParser.extractBrowserName` reduces the raw `User-Agent` string down to one of `Chrome`, `Firefox`, `Safari`, `Edge`, `Opera`, `Internet Explorer`, `Other` (unrecognized client), or `Unknown` (header missing). It uses simple substring checks in a specific order (checking Edge/Opera before Chrome, since their UA strings also contain "Chrome") rather than a full parsing library, so unusual or future browser UA formats may fall into `Other`. The raw header itself is not retained.
-- **No reliability hardening beyond health checks** — no rate limiting, no caching, no retry/circuit-breaker behavior. (Actuator health/info endpoints are implemented — see Features.)
+- **Rate limiting is in-memory, per-instance, and keyed on `request.getRemoteAddr()`** — fine for a single instance behind no proxy, but two problems if that changes: (1) running multiple instances means each has its own independent counter, so the effective limit multiplies with instance count; (2) behind a reverse proxy/load balancer, every request's remote address is the proxy's IP, not the real client's, so all traffic would share one bucket. A shared store (Redis) plus `X-Forwarded-For` handling would fix both — out of scope for this prototype.
+- **No caching, no retry/circuit-breaker behavior.** (Actuator health/info endpoints and rate limiting are implemented — see Features.)
 - **No management endpoints** — no list, update, delete, or deactivate operations; a link can never be turned off once created.
 - **No auth/ownership model** — any client can create/read any short URL.
 - **No CI pipeline** — tests, linting, and security scanning are not automated.
