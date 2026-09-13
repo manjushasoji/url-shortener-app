@@ -40,5 +40,5 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: Build and run tests
-        run: ./mvnw -B test
+      - name: Checkstyle, build, test, SpotBugs
+        run: ./mvnw -B verify

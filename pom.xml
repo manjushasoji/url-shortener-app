@@ -99,6 +99,68 @@
                    <argLine>-Dnet.bytebuddy.experimental=true</argLine>
                </configuration>
            </plugin>
+
+           <!--
+               Static-analysis quality gates. Both run as part of `./mvnw verify`
+               (which CI invokes) and fail the build on any violation:
+                 - Checkstyle (validate phase, before compilation) — hygiene rules
+                   in config/checkstyle.xml, applied to main and test sources.
+                 - SpotBugs (verify phase, on compiled classes) — bytecode bug
+                   detection; project-wide suppressions with rationale live in
+                   config/spotbugs-exclude.xml.
+               Run either on its own with `./mvnw checkstyle:check` or
+               `./mvnw compile spotbugs:check`.
+           -->
+           <plugin>
+               <groupId>org.apache.maven.plugins</groupId>
+               <artifactId>maven-checkstyle-plugin</artifactId>
+               <version>3.6.0</version>
+               <dependencies>
+                   <dependency>
+                       <groupId>com.puppycrawl.tools</groupId>
+                       <artifactId>checkstyle</artifactId>
+                       <version>10.21.1</version>
+                   </dependency>
+               </dependencies>
+               <configuration>
+                   <configLocation>config/checkstyle.xml</configLocation>
+                   <includeTestSourceDirectory>true</includeTestSourceDirectory>
+                   <includeResources>false</includeResources>
+                   <includeTestResources>false</includeTestResources>
+                   <consoleOutput>true</consoleOutput>
+                   <failsOnError>true</failsOnError>
+                   <violationSeverity>error</violationSeverity>
+               </configuration>
+               <executions>
+                   <execution>
+                       <id>checkstyle-check</id>
+                       <phase>validate</phase>
+                       <goals>
+                           <goal>check</goal>
+                       </goals>
+                   </execution>
+               </executions>
+           </plugin>
+           <plugin>
+               <groupId>com.github.spotbugs</groupId>
+               <artifactId>spotbugs-maven-plugin</artifactId>
+               <version>4.8.6.6</version>
+               <configuration>
+                   <effort>Max</effort>
+                   <threshold>Medium</threshold>
+                   <failOnError>true</failOnError>
+                   <excludeFilterFile>config/spotbugs-exclude.xml</excludeFilterFile>
+               </configuration>
+               <executions>
+                   <execution>
+                       <id>spotbugs-check</id>
+                       <phase>verify</phase>
+                       <goals>
+                           <goal>check</goal>
+                       </goals>
+                   </execution>
+               </executions>
+           </plugin>
        </plugins>
    </build>
 </project>

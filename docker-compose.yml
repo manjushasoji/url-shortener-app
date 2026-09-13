@@ -1,0 +1,22 @@
+# Local MySQL for development. Matches the defaults in application.properties
+# (root / admin1234 / url_shortener on localhost:3306), so `docker compose up -d`
+# followed by `./mvnw spring-boot:run` needs no further configuration.
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: url-shortener-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: admin1234
+      MYSQL_DATABASE: url_shortener
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-padmin1234"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mysql-data:

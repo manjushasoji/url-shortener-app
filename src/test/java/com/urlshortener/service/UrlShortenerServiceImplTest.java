@@ -6,6 +6,7 @@ import com.urlshortener.dto.ShortUrlResponse;
 import com.urlshortener.dto.UpdateShortUrlRequest;
 import com.urlshortener.entity.ShortUrl;
 import com.urlshortener.exception.DuplicateShortCodeException;
+import com.urlshortener.exception.InvalidShortCodeException;
 import com.urlshortener.exception.InvalidUpdateRequestException;
 import com.urlshortener.exception.InvalidUrlException;
 import com.urlshortener.exception.ResourceNotFoundException;
@@ -311,9 +312,18 @@ class UrlShortenerServiceImplTest {
     }
 
     @Test
-    void normalizeCustomCode_shouldThrowDuplicateShortCodeException_whenCodeIsInvalid() {
+    void normalizeCustomCode_shouldThrowInvalidShortCodeException_whenCodeIsInvalid() {
         CreateShortUrlRequest request = new CreateShortUrlRequest("https://example.com", "@#$");
 
-        assertThrows(DuplicateShortCodeException.class, () -> urlShortenerService.createShortUrl(request));
+        assertThrows(InvalidShortCodeException.class, () -> urlShortenerService.createShortUrl(request));
+        verify(shortUrlRepository, never()).save(any(ShortUrl.class));
+    }
+
+    @Test
+    void normalizeCustomCode_shouldThrowInvalidShortCodeException_whenCodeIsTooShort() {
+        CreateShortUrlRequest request = new CreateShortUrlRequest("https://example.com", "ab");
+
+        assertThrows(InvalidShortCodeException.class, () -> urlShortenerService.createShortUrl(request));
+        verify(shortUrlRepository, never()).save(any(ShortUrl.class));
     }
 }

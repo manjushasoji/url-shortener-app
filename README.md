@@ -26,7 +26,7 @@ A REST service for creating, resolving, and redirecting shortened URLs, built wi
 | Ownership of links (multi-user, per-user access) | ❌ Not implemented |
 | CI: build + test on every push/PR to `main` | ✅ Implemented |
 | CI: dependency vulnerability alerts (Dependabot) | ✅ Implemented |
-| CI: static analysis / linting | ❌ Not implemented |
+| CI: static analysis / linting (Checkstyle + SpotBugs, fail the build) | ✅ Implemented |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and control flow, and **Known Limitations** below for the full gap list against the target scope.
 
@@ -47,6 +47,14 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 ## Setup
 
 1. **Create/configure the database.** The app auto-creates the schema (`spring.jpa.hibernate.ddl-auto=update`) and the database itself (`createDatabaseIfNotExist=true`), so you only need a reachable MySQL server and a user with privileges to create databases/tables.
+
+   The quickest way to get one is the bundled [`docker-compose.yml`](docker-compose.yml), which starts MySQL 8 with credentials matching the local-dev defaults below (so no further configuration is needed):
+
+   ```bash
+   docker compose up -d
+   ```
+
+   Stop it with `docker compose down` (add `-v` to also discard the data volume).
 
 2. **Configure connection settings.** [`src/main/resources/application.properties`](src/main/resources/application.properties) reads the datasource from environment variables, falling back to a local-dev-only default if unset:
 
@@ -91,7 +99,7 @@ curl -i http://localhost:8080/api/v1/abc12345
 
 | Method | Path | Auth | Description | Success | Failure |
 |---|---|---|---|---|---|
-| `POST` | `/api/v1/urls` | `ROLE_ADMIN` | Create a short URL from `{ originalUrl, customCode?, expiresAt? }` (`expiresAt` must be a future timestamp) | `201 Created` | `400` invalid URL/payload/expiresAt, `401`/`403` auth, `409` short code exists |
+| `POST` | `/api/v1/urls` | `ROLE_ADMIN` | Create a short URL from `{ originalUrl, customCode?, expiresAt? }` (`expiresAt` must be a future timestamp) | `201 Created` | `400` invalid URL/payload/expiresAt/custom-code format, `401`/`403` auth, `409` short code already taken |
 | `GET` | `/api/v1/urls/{shortCode}` | `ROLE_ADMIN` | Fetch metadata for a short code | `200 OK` | `401`/`403` auth, `404` not found |
 | `PATCH` | `/api/v1/urls/{shortCode}` | `ROLE_ADMIN` | Partially update `{ active?, expiresAt? }` — a `null`/omitted field is left unchanged, not cleared | `200 OK` | `400` no fields provided or `expiresAt` not in the future, `401`/`403` auth, `404` not found |
 | `GET` | `/api/v1/{shortCode}` | Public | Redirect to the original URL, increments click count and records a click event | `302 Found` | `404` not found or inactive, `410` link expired |
@@ -112,6 +120,8 @@ Run the test suite with:
 ./mvnw test
 ```
 
+To run the full quality gate CI applies (Checkstyle → compile → tests → SpotBugs), use `./mvnw verify` instead. Checkstyle rules are in [`config/checkstyle.xml`](config/checkstyle.xml) (a small hygiene set: no tabs/trailing whitespace/star or unused imports, braces required, no empty blocks, ≤160-char lines); SpotBugs runs at `Max` effort / `Medium` threshold with the project-wide suppressions — each with a stated reason — in [`config/spotbugs-exclude.xml`](config/spotbugs-exclude.xml). Both fail the build on any violation.
+
 `ClickAnalyticsRecorder` is an interface (`ClickAnalyticsRecorderImpl` holds the actual `@Async` logic) — originally split out to keep the concrete class out of `UrlShortenerServiceImplTest`'s mocks, on the theory that Mockito's bytecode-instrumentation path was the problem. That theory turned out to be incomplete: the actual failure some contributors will see running `./mvnw test` locally is `Could not modify all classes [class java.lang.Object, ...]` caused by Byte Buddy (Mockito's bytecode library) not yet recognizing a JDK newer than it was built against (`Java N is not supported by the current version of Byte Buddy`) — this affects mocking *anything*, interface or class, on such a JDK, since even mocking an interface generates a proxy class via Byte Buddy. The actual fix is the `-Dnet.bytebuddy.experimental=true` Surefire flag below; the interface split is kept anyway since it's still a reasonable design (matches the `UrlShortenerService`/`Impl` pattern already used here), but don't rely on "mock interfaces, not classes" as a real fix for this specific error.
 
 The `pom.xml` Surefire config sets `-Dnet.bytebuddy.experimental=true`, letting Byte Buddy attempt best-effort support for a JDK it hasn't officially validated against. This only matters for local runs on a very new JDK — CI pins JDK 21 via `actions/setup-java` and is unaffected either way.
@@ -123,7 +133,7 @@ Current coverage (`src/test/java`):
 - `ShortUrlRepositoryTest` / `ClickAnalyticsRepositoryTest` — persistence layer contracts
 - `GlobalExceptionHandlerTest` — error response shape per exception type, including `410` expired-link, `400` invalid-update, and `404` unmapped-path (`NoResourceFoundException`) mappings
 - `UrlShortenerServiceImplTest` / `UrlShortenerControllerTest` — the new `PATCH` endpoint: deactivate, update `expiresAt`, update both, leaving an unspecified field unchanged, rejecting an empty update, `404` for a missing code, and `400` for a past `expiresAt` (exercised end-to-end through real Bean Validation via MockMvc)
-- `FixedWindowRateLimiterTest` / `RateLimitFilterTest` — window limit/reset behavior (via an injectable `Clock`, not real sleeps) and the filter's pass-through/`429` responses per client IP
+- `FixedWindowRateLimiterTest` / `RateLimitFilterTest` — window limit/reset behavior (via an injectable `Clock`, not real sleeps), that expired client windows are purged from memory once per window while still-active ones survive the sweep with their counts intact, and the filter's pass-through/`429` responses per client IP
 - `ClickAnalyticsRecorderTest` — verifies what gets saved (parsed browser name, referrer); run directly rather than through Spring, so it exercises the business logic, not the actual async dispatch (see Not yet covered)
 - `ApiErrorControllerTest` — verifies the `/error` handler maps `HttpServletResponse.getStatus()` plus the error-attributes' `path`/`message` into the same `ApiError` shape as every other endpoint, including a dedicated regression test for the security-401-defaulted-to-500 bug and sensible defaults when an attribute or the response status is missing
 - `SecurityConfigTest` — the password encoder round-trips, and the in-memory admin user is registered with the configured username, a correctly-encoded password, and `ROLE_ADMIN`
@@ -137,9 +147,9 @@ Current coverage (`src/test/java`):
 
 ## Continuous Integration
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `./mvnw -B test` on every push and pull request against `main` (the wrapper, so CI uses the exact same Maven version as local dev), against a real MySQL 8 service container (not mocked) — this exercises `UrlShortenerAppApplicationTests`' full Spring context load (`@SpringBootTest`), which needs a live datasource to even start, using the `DB_URL`/`DB_USERNAME`/`DB_PASSWORD` environment-variable overrides described in Setup. [`.github/dependabot.yml`](.github/dependabot.yml) opens weekly PRs for outdated/vulnerable Maven dependencies and GitHub Actions versions.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `./mvnw -B verify` — Checkstyle, compile, the test suite, then SpotBugs — on every push and pull request against `main` (the wrapper, so CI uses the exact same Maven version as local dev), against a real MySQL 8 service container (not mocked) — this exercises `UrlShortenerAppApplicationTests`' full Spring context load (`@SpringBootTest`), which needs a live datasource to even start, using the `DB_URL`/`DB_USERNAME`/`DB_PASSWORD` environment-variable overrides described in Setup. [`.github/dependabot.yml`](.github/dependabot.yml) opens weekly PRs for outdated/vulnerable Maven dependencies and GitHub Actions versions.
 
-Not automated: static analysis / linting (e.g. Checkstyle, SpotBugs) and any deeper security scanning (e.g. dependency CVE scanning beyond what Dependabot alerts on) — see Known Limitations.
+Not automated: dependency CVE scanning beyond what Dependabot alerts on, and any load/performance testing — see Known Limitations.
 
 ## Known Limitations
 
@@ -153,7 +163,7 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 - **Daily-breakdown query untested against real MySQL** — the `CAST(... AS date)` JPQL aggregation in `ClickAnalyticsRepository` is covered by mock-based unit tests only; it hasn't been run against a live database yet.
 - **`referrer` will often be null** — it's populated from the `Referer` HTTP header, which browsers only send when navigation originates from a link on another page. Direct/typed navigation, HTTPS→HTTP downgrades, and privacy-focused browsers/extensions all omit it. This is expected client behavior, not a bug — treat `referrer` as best-effort, not guaranteed data.
 - **`user_agent` stores a parsed browser name, not the raw header** — `UserAgentParser.extractBrowserName` reduces the raw `User-Agent` string down to one of `Chrome`, `Firefox`, `Safari`, `Edge`, `Opera`, `Internet Explorer`, `Other` (unrecognized client), or `Unknown` (header missing). It uses simple substring checks in a specific order (checking Edge/Opera before Chrome, since their UA strings also contain "Chrome") rather than a full parsing library, so unusual or future browser UA formats may fall into `Other`. The raw header itself is not retained.
-- **Rate limiting is in-memory, per-instance, and keyed on `request.getRemoteAddr()`** — fine for a single instance behind no proxy, but two problems if that changes: (1) running multiple instances means each has its own independent counter, so the effective limit multiplies with instance count; (2) behind a reverse proxy/load balancer, every request's remote address is the proxy's IP, not the real client's, so all traffic would share one bucket. A shared store (Redis) plus `X-Forwarded-For` handling would fix both — out of scope for this prototype.
+- **Rate limiting is in-memory, per-instance, and keyed on `request.getRemoteAddr()`** — fine for a single instance behind no proxy, but two problems if that changes: (1) running multiple instances means each has its own independent counter, so the effective limit multiplies with instance count; (2) behind a reverse proxy/load balancer, every request's remote address is the proxy's IP, not the real client's, so all traffic would share one bucket. A shared store (Redis) plus `X-Forwarded-For` handling would fix both — out of scope for this prototype. Memory use is bounded, though: expired client windows are swept out lazily (at most once per window duration, on the next request), so the map holds only clients seen within roughly the last two windows rather than every IP ever seen.
 - **The redirect cache is in-memory and per-instance, same as the rate limiter** — `@CacheEvict` on `updateShortUrl` only clears the cache on whichever instance handled that request; if this ever runs on more than one instance, another instance could keep serving a just-deactivated link from its own stale cache entry until its 5-minute TTL expires. The TTL is deliberately short specifically to bound that gap; a shared cache (Redis) would close it entirely but is out of scope for this prototype.
 - **The cache assumes `active`/`expiresAt` only ever change through `updateShortUrl`** — true today (it's the only write path for either field), but `@CacheEvict` has no way to know if that assumption stops holding; a future write path that bypasses this method would leave the cache silently stale until TTL.
 - **No retry/circuit-breaker behavior.** (Actuator health/info endpoints, rate limiting, async click recording, and caching are implemented — see Features.)
@@ -163,7 +173,7 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 - **Basic Auth sends credentials on every request** — base64-encoded, not encrypted; safe only over HTTPS. This app doesn't terminate or enforce TLS itself (that's normally a reverse-proxy/load-balancer concern), so there's no local safeguard against Basic Auth credentials going out in the clear if someone hits the app directly over plain HTTP outside local dev.
 - **`RateLimitFilter` doesn't see requests Spring Security rejects** — Spring Security's filter chain runs before `RateLimitFilter` in the servlet filter order (Security's default order is well ahead of the `1` this custom filter registers at), so a failed-auth request to an admin endpoint is rejected with `401`/`403` before ever reaching the rate limiter. Practically: repeated bad-credential attempts against `/api/v1/urls/**` aren't counted against that IP's quota, and Spring Security itself has no built-in lockout either — brute-forcing the admin password isn't rate-limited by anything in this app today.
 - **No auth/ownership model beyond a single admin role** — the admin can create/read/update *any* short URL; there's no concept of "this link belongs to this user."
-- **CI covers build + test only** — no static analysis/linting or dependency-CVE scanning beyond Dependabot's alerts is wired in yet (see Continuous Integration above).
+- **CI covers Checkstyle + build + test + SpotBugs, but no CVE scanning or load testing** — dependency vulnerability coverage is only what Dependabot alerts on (no OWASP dependency-check or similar in the pipeline), and there is no performance baseline for the redirect path (see Continuous Integration above).
 - **`ApiErrorController` is not a rarely-used fallback — it's the normal path for every Spring Security rejection.** Earlier documentation here claimed `/error` was rarely reached, based on the unmapped-path case alone; adding admin authentication changed that; a `401`/`403` from `SecurityConfig` is dispatched to `/error` via `response.sendError()` for every unauthenticated/wrong-role request, so this controller now runs on essentially every failed-auth call, not just an edge case. A real bug surfaced from this: the controller originally derived its response status by parsing a `"status"` key out of Spring Boot's `DefaultErrorAttributes` map, which is populated reliably for the `NoResourceFoundException` path but was **not** reliably populated for a security-triggered `sendError()` — a `401` rejection came back as `500 Internal Server Error` with the body `{"message": "Unauthorized", ...}` (the message came through, the status silently didn't). Fixed by reading the status directly off `HttpServletResponse.getStatus()` instead, which `sendError()`/`setStatus()` set synchronously regardless of which mechanism triggered the error — see the code comment in `ApiErrorController` and the Key Design Decision in ARCHITECTURE.md for the full reasoning on why this is now reliable for every path that reaches `/error` in this app.
 
 ## Project Status

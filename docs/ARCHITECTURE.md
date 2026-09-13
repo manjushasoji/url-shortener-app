@@ -98,7 +98,7 @@ Cross-cutting:
 - **Spring Security** — HTTP Basic Auth, one in-memory admin user, `ROLE_ADMIN`-gated management endpoints. `spring-security-test` provides `@WithMockUser`/`@WithAnonymousUser` for the `@WebMvcTest` slices.
 - **Spring Cache + Caffeine** — in-memory caching for the redirect lookup only; see `CacheConfig`/`ShortUrlCache` above and the caching bullets in Key Design Decisions.
 - **JUnit 5 / Spring Boot Test** — unit and slice tests per layer. Surefire runs with `-Dnet.bytebuddy.experimental=true` so `mvn test` still works on a JDK newer than the bundled Mockito/Byte Buddy officially supports (relevant for local dev on a bleeding-edge JDK; CI's pinned JDK 21 doesn't need it).
-- **GitHub Actions** (`.github/workflows/ci.yml`) — runs the test suite against a real MySQL service container on every push/PR to `main`. **Dependabot** (`.github/dependabot.yml`) — weekly PRs for outdated/vulnerable Maven and Actions dependencies.
+- **GitHub Actions** (`.github/workflows/ci.yml`) — runs `./mvnw verify` (Checkstyle → compile → test suite → SpotBugs) against a real MySQL service container on every push/PR to `main`. **Checkstyle** (`config/checkstyle.xml`) and **SpotBugs** (`config/spotbugs-exclude.xml` for the suppressions, each with a reason) both fail the build on any violation. **Dependabot** (`.github/dependabot.yml`) — weekly PRs for outdated/vulnerable Maven and Actions dependencies.
 - **Maven Wrapper** (`mvnw` / `mvnw.cmd`, `.mvn/wrapper/maven-wrapper.properties`, `wrapperVersion=3.3.4`, `distributionUrl` pinned to Maven `3.9.16`) — no local Maven install needed; `./mvnw`/`mvnw.cmd` download and run the pinned version themselves. CI uses the same wrapper invocation, so local dev and CI are guaranteed to run the identical Maven version — closing off one more axis of the environment drift that caused real problems earlier in this project (see Key Design Decisions). `mvnw` needs its executable bit set in git (`100755`) to run on Linux/macOS without an explicit `chmod +x` first; this was initially committed as `100644` and had to be corrected.
 
 ## 3. Data Model
@@ -205,7 +205,7 @@ These are scope gaps, not implementation bugs — tracked in full in the README'
 - AuthN/AuthZ now exists (`ROLE_ADMIN` via HTTP Basic on `/api/v1/urls/**`), but only as a single hardcoded admin — no multi-user accounts, no per-user ownership of links, no JWT/OAuth, no password rotation/lockout (see Known Limitations in the README)
 - `RateLimitFilter` doesn't rate-limit failed-authentication attempts, since Spring Security's filter chain rejects them first (see Key Design Decisions and Known Limitations in the README)
 - `/actuator/health` detail exposure has no access control — fine for local/prototype use, not for a shared deployment
-- Rate limiting is in-memory/per-instance and keyed on the immediate TCP peer address — breaks down behind a load balancer or across multiple instances (see Known Limitations in the README)
+- Rate limiting is in-memory/per-instance and keyed on the immediate TCP peer address — breaks down behind a load balancer or across multiple instances (see Known Limitations in the README); its memory footprint is bounded by a lazy sweep of expired windows, but that sweep is still per-instance
 - Async click recording has no delivery guarantee — a failed or queue-rejected write is logged and dropped, not retried (see Known Limitations in the README)
-- CI runs the test suite but no static analysis, linting, or dependency-CVE scanning beyond Dependabot's alerts
+- CI runs Checkstyle, the test suite, and SpotBugs, but no dependency-CVE scanning beyond Dependabot's alerts and no load testing
 - The committed DB credential defaults are env-var-overridable, not eliminated — see Known Limitations in the README

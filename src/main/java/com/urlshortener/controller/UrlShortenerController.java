@@ -41,7 +41,7 @@ public class UrlShortenerController {
     @Operation(summary = "Create a short URL", description = "Creates a shortened URL for a valid absolute URL. Optionally accepts a future expiresAt timestamp after which the link stops redirecting. Requires ROLE_ADMIN.")
     @ApiResponses(value = {
         @ApiResponse(responseCode = "201", description = "Short URL created successfully"),
-        @ApiResponse(responseCode = "400", description = "Invalid URL or payload"),
+        @ApiResponse(responseCode = "400", description = "Invalid URL, custom code format, or payload"),
         @ApiResponse(responseCode = "401", description = "Missing or invalid credentials"),
         @ApiResponse(responseCode = "403", description = "Authenticated but not an admin"),
         @ApiResponse(responseCode = "409", description = "Short code already exists")

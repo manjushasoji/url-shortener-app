@@ -41,6 +41,17 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
+    void handleInvalidShortCode_shouldReturnBadRequest() {
+        HttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/urls");
+        InvalidShortCodeException ex = new InvalidShortCodeException("Custom short code cannot be empty");
+
+        ResponseEntity<ApiError> response = exceptionHandler.handleInvalidShortCode(ex, request);
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        assertEquals("Custom short code cannot be empty", response.getBody().message());
+    }
+
+    @Test
     void handleDuplicateCode_shouldReturnConflict() {
         HttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/urls");
         DuplicateShortCodeException ex = new DuplicateShortCodeException("Short code already exists");
