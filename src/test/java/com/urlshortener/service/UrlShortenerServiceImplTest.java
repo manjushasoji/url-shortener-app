@@ -3,8 +3,10 @@ package com.urlshortener.service;
 import com.urlshortener.dto.ClickStatsResponse;
 import com.urlshortener.dto.CreateShortUrlRequest;
 import com.urlshortener.dto.ShortUrlResponse;
+import com.urlshortener.dto.UpdateShortUrlRequest;
 import com.urlshortener.entity.ShortUrl;
 import com.urlshortener.exception.DuplicateShortCodeException;
+import com.urlshortener.exception.InvalidUpdateRequestException;
 import com.urlshortener.exception.InvalidUrlException;
 import com.urlshortener.exception.ResourceNotFoundException;
 import com.urlshortener.exception.UrlExpiredException;
@@ -133,6 +135,76 @@ class UrlShortenerServiceImplTest {
         when(shortUrlRepository.findByShortCode("missing")).thenReturn(Optional.empty());
 
         assertThrows(ResourceNotFoundException.class, () -> urlShortenerService.getShortUrlByCode("missing"));
+    }
+
+    @Test
+    void updateShortUrl_shouldDeactivate_whenActiveFalseProvided() {
+        ShortUrl existing = new ShortUrl("abc12345", "https://example.com");
+
+        when(shortUrlRepository.findByShortCode("abc12345")).thenReturn(Optional.of(existing));
+        when(shortUrlRepository.save(any(ShortUrl.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        ShortUrlResponse response = urlShortenerService.updateShortUrl("abc12345", new UpdateShortUrlRequest(false, null));
+
+        assertEquals(false, response.active());
+    }
+
+    @Test
+    void updateShortUrl_shouldUpdateExpiresAt_whenProvided() {
+        ShortUrl existing = new ShortUrl("abc12345", "https://example.com");
+        LocalDateTime newExpiresAt = LocalDateTime.now().plusDays(3);
+
+        when(shortUrlRepository.findByShortCode("abc12345")).thenReturn(Optional.of(existing));
+        when(shortUrlRepository.save(any(ShortUrl.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        ShortUrlResponse response = urlShortenerService.updateShortUrl("abc12345", new UpdateShortUrlRequest(null, newExpiresAt));
+
+        assertEquals(newExpiresAt, response.expiresAt());
+        assertEquals(true, response.active());
+    }
+
+    @Test
+    void updateShortUrl_shouldUpdateBothFields_whenBothProvided() {
+        ShortUrl existing = new ShortUrl("abc12345", "https://example.com");
+        LocalDateTime newExpiresAt = LocalDateTime.now().plusDays(3);
+
+        when(shortUrlRepository.findByShortCode("abc12345")).thenReturn(Optional.of(existing));
+        when(shortUrlRepository.save(any(ShortUrl.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        ShortUrlResponse response = urlShortenerService.updateShortUrl("abc12345", new UpdateShortUrlRequest(false, newExpiresAt));
+
+        assertEquals(false, response.active());
+        assertEquals(newExpiresAt, response.expiresAt());
+    }
+
+    @Test
+    void updateShortUrl_shouldLeaveExpiresAtUnchanged_whenOnlyActiveProvided() {
+        ShortUrl existing = new ShortUrl("abc12345", "https://example.com");
+        LocalDateTime originalExpiresAt = LocalDateTime.now().plusDays(1);
+        existing.setExpiresAt(originalExpiresAt);
+
+        when(shortUrlRepository.findByShortCode("abc12345")).thenReturn(Optional.of(existing));
+        when(shortUrlRepository.save(any(ShortUrl.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        ShortUrlResponse response = urlShortenerService.updateShortUrl("abc12345", new UpdateShortUrlRequest(false, null));
+
+        assertEquals(originalExpiresAt, response.expiresAt());
+    }
+
+    @Test
+    void updateShortUrl_shouldThrowInvalidUpdateRequestException_whenNoFieldsProvided() {
+        assertThrows(InvalidUpdateRequestException.class,
+            () -> urlShortenerService.updateShortUrl("abc12345", new UpdateShortUrlRequest(null, null)));
+
+        verify(shortUrlRepository, never()).findByShortCode(any());
+    }
+
+    @Test
+    void updateShortUrl_shouldThrowResourceNotFound_whenCodeDoesNotExist() {
+        when(shortUrlRepository.findByShortCode("missing")).thenReturn(Optional.empty());
+
+        assertThrows(ResourceNotFoundException.class,
+            () -> urlShortenerService.updateShortUrl("missing", new UpdateShortUrlRequest(false, null)));
     }
 
     @Test

@@ -4,8 +4,10 @@ import com.urlshortener.dto.ClickStatsResponse;
 import com.urlshortener.dto.CreateShortUrlRequest;
 import com.urlshortener.dto.DailyClickCount;
 import com.urlshortener.dto.ShortUrlResponse;
+import com.urlshortener.dto.UpdateShortUrlRequest;
 import com.urlshortener.entity.ShortUrl;
 import com.urlshortener.exception.DuplicateShortCodeException;
+import com.urlshortener.exception.InvalidUpdateRequestException;
 import com.urlshortener.exception.ResourceNotFoundException;
 import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.repository.ClickAnalyticsRepository;
@@ -99,6 +101,26 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
             .orElseThrow(() -> new ResourceNotFoundException("Short URL not found for code: " + shortCode));
 
         return toResponse(entity);
+    }
+
+    @Override
+    @Transactional
+    public ShortUrlResponse updateShortUrl(String shortCode, UpdateShortUrlRequest request) {
+        if (request.active() == null && request.expiresAt() == null) {
+            throw new InvalidUpdateRequestException("At least one of active or expiresAt must be provided");
+        }
+
+        ShortUrl entity = shortUrlRepository.findByShortCode(shortCode)
+            .orElseThrow(() -> new ResourceNotFoundException("Short URL not found for code: " + shortCode));
+
+        if (request.active() != null) {
+            entity.setActive(request.active());
+        }
+        if (request.expiresAt() != null) {
+            entity.setExpiresAt(request.expiresAt());
+        }
+
+        return toResponse(shortUrlRepository.save(entity));
     }
 
     @Override

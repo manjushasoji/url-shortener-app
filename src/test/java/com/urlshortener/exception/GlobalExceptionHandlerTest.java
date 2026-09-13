@@ -58,4 +58,15 @@ class GlobalExceptionHandlerTest {
         assertEquals(HttpStatus.GONE, response.getStatusCode());
         assertEquals("Short URL has expired: abc12345", response.getBody().message());
     }
+
+    @Test
+    void handleInvalidUpdateRequest_shouldReturnBadRequest() {
+        HttpServletRequest request = new MockHttpServletRequest("PATCH", "/api/v1/urls/abc12345");
+        InvalidUpdateRequestException ex = new InvalidUpdateRequestException("At least one of active or expiresAt must be provided");
+
+        ResponseEntity<ApiError> response = exceptionHandler.handleInvalidUpdateRequest(ex, request);
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        assertEquals("At least one of active or expiresAt must be provided", response.getBody().message());
+    }
 }

@@ -3,6 +3,7 @@ package com.urlshortener.controller;
 import com.urlshortener.dto.ClickStatsResponse;
 import com.urlshortener.dto.CreateShortUrlRequest;
 import com.urlshortener.dto.ShortUrlResponse;
+import com.urlshortener.dto.UpdateShortUrlRequest;
 import com.urlshortener.service.UrlShortenerService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -14,6 +15,7 @@ import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -54,6 +56,20 @@ public class UrlShortenerController {
         @Parameter(description = "Short code generated for the original URL", example = "abc12345")
         @PathVariable String shortCode) {
         return ResponseEntity.ok(urlShortenerService.getShortUrlByCode(shortCode));
+    }
+
+    @Operation(summary = "Update active status and/or expiration", description = "Partially updates a short URL's active flag and/or expiresAt. A null field is left unchanged (not cleared) — provide at least one of active/expiresAt. Note: an already-set expiresAt cannot be cleared back to null through this endpoint.")
+    @ApiResponses(value = {
+        @ApiResponse(responseCode = "200", description = "Updated successfully"),
+        @ApiResponse(responseCode = "400", description = "No fields provided, or expiresAt not in the future"),
+        @ApiResponse(responseCode = "404", description = "Short URL not found")
+    })
+    @PatchMapping("/urls/{shortCode}")
+    public ResponseEntity<ShortUrlResponse> updateShortUrl(
+        @Parameter(description = "Short code generated for the original URL", example = "abc12345")
+        @PathVariable String shortCode,
+        @Valid @RequestBody UpdateShortUrlRequest request) {
+        return ResponseEntity.ok(urlShortenerService.updateShortUrl(shortCode, request));
     }
 
     @Operation(summary = "Redirect to original URL", description = "Redirects users to the original URL using the short code. Uses a 302 (not 301) so browsers re-request the redirect on every click instead of caching it, which would otherwise cause click counts to be undercounted.")
