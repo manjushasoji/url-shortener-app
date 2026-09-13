@@ -2,12 +2,15 @@ package com.urlshortener.exception;
 
 import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GlobalExceptionHandlerTest {
 
@@ -68,5 +71,18 @@ class GlobalExceptionHandlerTest {
 
         assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
         assertEquals("At least one of active or expiresAt must be provided", response.getBody().message());
+    }
+
+    @Test
+    void handleNoResourceFound_shouldReturnNotFound() {
+        HttpServletRequest request = new MockHttpServletRequest("GET", "/api/v2/wcom");
+        NoResourceFoundException ex = new NoResourceFoundException(HttpMethod.GET, "api/v2/wcom");
+
+        ResponseEntity<ApiError> response = exceptionHandler.handleNoResourceFound(ex, request);
+
+        assertEquals(HttpStatus.NOT_FOUND, response.getStatusCode());
+        assertEquals("/api/v2/wcom", response.getBody().path());
+        assertTrue(response.getBody().message().contains("GET"));
+        assertTrue(response.getBody().message().contains("/api/v2/wcom"));
     }
 }
