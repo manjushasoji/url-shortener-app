@@ -65,7 +65,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 |---|---|---|---|---|
 | `POST` | `/api/v1/urls` | Create a short URL from `{ originalUrl, customCode? }` | `201 Created` | `400` invalid URL/payload, `409` short code exists |
 | `GET` | `/api/v1/urls/{shortCode}` | Fetch metadata for a short code | `200 OK` | `404` not found |
-| `GET` | `/api/v1/{shortCode}` | Redirect to the original URL, increments click count and records a click event | `301 Moved Permanently` | `404` not found or inactive |
+| `GET` | `/api/v1/{shortCode}` | Redirect to the original URL, increments click count and records a click event | `302 Found` | `404` not found or inactive |
 | `GET` | `/api/v1/urls/{shortCode}/stats` | Click analytics: total clicks, first/last click timestamps, daily breakdown | `200 OK` | `404` not found |
 
 ## Testing
@@ -95,6 +95,7 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 - **Click recording is synchronous** — each redirect writes a `click_analytics` row in the same request/transaction as the redirect itself, adding a write to the hot path. Planned fix: move this to an async write once the reliability work lands, so analytics recording can't slow down or fail a redirect.
 - **No "top links" analytics view** — per-link stats (`/api/v1/urls/{shortCode}/stats`) are implemented, but there's no endpoint yet to list/sort all URLs by click volume.
 - **Daily-breakdown query untested against real MySQL** — the `CAST(... AS date)` JPQL aggregation in `ClickAnalyticsRepository` is covered by mock-based unit tests only; it hasn't been run against a live database yet.
+- **`referrer` will often be null** — it's populated from the `Referer` HTTP header, which browsers only send when navigation originates from a link on another page. Direct/typed navigation, HTTPS→HTTP downgrades, and privacy-focused browsers/extensions all omit it. This is expected client behavior, not a bug — treat `referrer` as best-effort, not guaranteed data.
 - **No reliability hardening** — no rate limiting, no caching, no Actuator health/readiness endpoints, no retry/circuit-breaker behavior.
 - **No management endpoints** — no list, update, delete, or deactivate operations; a link can never be turned off once created.
 - **No auth/ownership model** — any client can create/read any short URL.

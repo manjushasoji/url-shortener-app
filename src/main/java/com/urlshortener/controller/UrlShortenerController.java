@@ -56,9 +56,9 @@ public class UrlShortenerController {
         return ResponseEntity.ok(urlShortenerService.getShortUrlByCode(shortCode));
     }
 
-    @Operation(summary = "Redirect to original URL", description = "Redirects users to the original URL using the short code.")
+    @Operation(summary = "Redirect to original URL", description = "Redirects users to the original URL using the short code. Uses a 302 (not 301) so browsers re-request the redirect on every click instead of caching it, which would otherwise cause click counts to be undercounted.")
     @ApiResponses(value = {
-        @ApiResponse(responseCode = "301", description = "Redirected successfully"),
+        @ApiResponse(responseCode = "302", description = "Redirected successfully"),
         @ApiResponse(responseCode = "404", description = "Short URL not found")
     })
     @GetMapping("/{shortCode}")
@@ -72,7 +72,7 @@ public class UrlShortenerController {
             request.getHeader("User-Agent")
         );
         RedirectView redirectView = new RedirectView(originalUrl);
-        redirectView.setStatusCode(HttpStatus.MOVED_PERMANENTLY);
+        redirectView.setStatusCode(HttpStatus.FOUND);
         return redirectView;
     }
 

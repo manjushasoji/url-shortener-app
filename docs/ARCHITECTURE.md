@@ -79,7 +79,7 @@ Cross-cutting:
 | `id` | BIGINT, PK, identity | |
 | `short_url_id` | BIGINT, indexed | logically references `short_url.id`, but stored as a plain value — no JPA `@ManyToOne` relation or DB-level foreign-key constraint (see Key Design Decisions) |
 | `clicked_at` | TIMESTAMP, indexed | set via `@PrePersist`; indexed to support the daily-breakdown aggregation query |
-| `referrer` | VARCHAR(2048), nullable | from the `Referer` request header, when present |
+| `referrer` | VARCHAR(2048), nullable | from the `Referer` request header; frequently null — browsers only send it when navigation originated from a link on another page (not for direct/typed navigation), and some browsers/extensions strip it entirely (see Known Limitations in the README) |
 | `user_agent` | VARCHAR(512), nullable | from the `User-Agent` request header, when present |
 
 ## 4. Control Flow
@@ -96,7 +96,7 @@ Cross-cutting:
 2. Service looks up the entity by short code; `404` via `ResourceNotFoundException` if absent.
 3. If `active` is `false`, also `404`s (though nothing in the current code ever flips `active` to `false`).
 4. Click count is incremented and saved, and a `click_analytics` row is written in the same transaction (short_url_id, timestamp, referrer, user agent). *(This makes the write path do more work per redirect — see Known Limitations regarding making this async.)*
-5. Controller issues a `301` redirect to `original_url`.
+5. Controller issues a `302` redirect to `original_url`. *(Deliberately not `301` — see Key Design Decisions: a 301 would let browsers cache the redirect and skip the server on repeat clicks, undercounting `click_count`/`click_analytics`.)*
 
 **Click stats (`GET /api/v1/urls/{shortCode}/stats`):**
 1. Service resolves the `ShortUrl` by code; `404` if absent.
@@ -108,7 +108,7 @@ Cross-cutting:
 - **Layered architecture (controller → service interface/impl → repository)** was chosen over a transaction-script or single-class design for testability: each layer is independently unit-testable, and the service is programmed against an interface (`UrlShortenerService`) so it can be mocked in controller tests.
 - **Random short codes over sequence-based/hash-based encoding** (e.g., base62 of the auto-increment ID): simpler to implement and avoids leaking row-count/creation-order information through the code, at the cost of needing a uniqueness check per creation rather than a guaranteed-unique derivation.
 - **`ddl-auto=update` instead of a migration tool (Flyway/Liquibase)**: faster to iterate on for a prototype, but not something to carry into a shared/production environment — schema changes aren't versioned or reviewable as migrations.
-- **301 (permanent) redirect**: matches typical URL-shortener semantics (and lets browsers cache the redirect), but means a redirect target can never be safely changed after creation without risking stale client-side caches — a trade-off worth revisiting once/if an "update URL" feature is added.
+- **302 (temporary) redirect, not 301**: originally implemented as `301 Moved Permanently`, which is spec-cacheable by browsers — testing showed that a browser given a 301 once will resolve the short link from its own cache on every subsequent click, never re-hitting the server, so `click_count` and `click_analytics` silently stop incrementing for that visitor. Switched to `302 Found` so every click reaches the server and gets counted. Trade-off: the service loses the browser-caching benefit a 301 gave, and a redirect target can be changed later without stale-cache risk — both acceptable given click accuracy is the core feature.
 - **Event table (`click_analytics`) instead of only a counter**: a single `click_count` integer can't answer "clicks over time" or support a future "top links" view, so individual click events are recorded and aggregated on read. Trade-off: this is a write on every redirect (one INSERT plus the existing `click_count` UPDATE) instead of a single UPDATE — acceptable for a prototype, but the reason the README calls out making this write asynchronous as a near-term reliability follow-up.
 - **`short_url_id` stored as a plain indexed column, not a JPA `@ManyToOne`**: avoids loading/managing the `ShortUrl` association just to write an analytics row, keeping the redirect's hot path lighter at the cost of no referential-integrity enforcement — there's an index on `short_url_id` for query performance, but no actual foreign-key constraint or cascade behavior at either the entity or schema level.
 
