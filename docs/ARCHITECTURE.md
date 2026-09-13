@@ -80,7 +80,7 @@ Cross-cutting:
 | `short_url_id` | BIGINT, indexed | logically references `short_url.id`, but stored as a plain value — no JPA `@ManyToOne` relation or DB-level foreign-key constraint (see Key Design Decisions) |
 | `clicked_at` | TIMESTAMP, indexed | set via `@PrePersist`; indexed to support the daily-breakdown aggregation query |
 | `referrer` | VARCHAR(2048), nullable | from the `Referer` request header; frequently null — browsers only send it when navigation originated from a link on another page (not for direct/typed navigation), and some browsers/extensions strip it entirely (see Known Limitations in the README) |
-| `user_agent` | VARCHAR(512), nullable | from the `User-Agent` request header, when present |
+| `user_agent` | VARCHAR(512), nullable | a parsed browser name (`Chrome`, `Firefox`, `Safari`, `Edge`, `Opera`, `Internet Explorer`, `Other`, or `Unknown`) derived from the raw `User-Agent` header via `UserAgentParser` — the raw header itself is not stored (see Known Limitations in the README) |
 
 ## 4. Control Flow
 
@@ -95,7 +95,7 @@ Cross-cutting:
 1. Controller reads the `Referer` and `User-Agent` headers off the incoming request.
 2. Service looks up the entity by short code; `404` via `ResourceNotFoundException` if absent.
 3. If `active` is `false`, also `404`s (though nothing in the current code ever flips `active` to `false`).
-4. Click count is incremented and saved, and a `click_analytics` row is written in the same transaction (short_url_id, timestamp, referrer, user agent). *(This makes the write path do more work per redirect — see Known Limitations regarding making this async.)*
+4. Click count is incremented and saved, and a `click_analytics` row is written in the same transaction (short_url_id, timestamp, referrer, and the browser name parsed from the raw `User-Agent` header via `UserAgentParser`). *(This makes the write path do more work per redirect — see Known Limitations regarding making this async.)*
 5. Controller issues a `302` redirect to `original_url`. *(Deliberately not `301` — see Key Design Decisions: a 301 would let browsers cache the redirect and skip the server on repeat clicks, undercounting `click_count`/`click_analytics`.)*
 
 **Click stats (`GET /api/v1/urls/{shortCode}/stats`):**
@@ -111,6 +111,7 @@ Cross-cutting:
 - **302 (temporary) redirect, not 301**: originally implemented as `301 Moved Permanently`, which is spec-cacheable by browsers — testing showed that a browser given a 301 once will resolve the short link from its own cache on every subsequent click, never re-hitting the server, so `click_count` and `click_analytics` silently stop incrementing for that visitor. Switched to `302 Found` so every click reaches the server and gets counted. Trade-off: the service loses the browser-caching benefit a 301 gave, and a redirect target can be changed later without stale-cache risk — both acceptable given click accuracy is the core feature.
 - **Event table (`click_analytics`) instead of only a counter**: a single `click_count` integer can't answer "clicks over time" or support a future "top links" view, so individual click events are recorded and aggregated on read. Trade-off: this is a write on every redirect (one INSERT plus the existing `click_count` UPDATE) instead of a single UPDATE — acceptable for a prototype, but the reason the README calls out making this write asynchronous as a near-term reliability follow-up.
 - **`short_url_id` stored as a plain indexed column, not a JPA `@ManyToOne`**: avoids loading/managing the `ShortUrl` association just to write an analytics row, keeping the redirect's hot path lighter at the cost of no referential-integrity enforcement — there's an index on `short_url_id` for query performance, but no actual foreign-key constraint or cascade behavior at either the entity or schema level.
+- **Hand-rolled `UserAgentParser` instead of a UA-parsing library**: the raw `User-Agent` header is a single string that packs multiple browser/engine tokens together for legacy compatibility (e.g. Chrome's UA also contains "Safari" and "AppleWebKit"), which is confusing to read directly in analytics. A small ordered set of substring checks (most-derived browsers like Edge/Opera checked before Chrome, since they also contain a "Chrome" token) covers the common desktop/mobile browsers without adding a dependency. Trade-off: it won't correctly classify less common or future browsers (they fall into `Other`), whereas a maintained library (e.g. `ua-parser`) would stay current with new UA formats at the cost of an added dependency.
 
 ## 6. Execution Approach
 
