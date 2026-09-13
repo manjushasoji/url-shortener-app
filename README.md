@@ -168,4 +168,4 @@ These are open gaps against the intended scope (core APIs + analytics + reliabil
 
 ## Project Status
 
-This is an active, incremental build. See [docs/SCENARIOS.md](docs/SCENARIOS.md) for the greenfield/brownfield/ambiguous scenario walkthroughs (decomposition, execution, validation, with links to the actual merged PRs), and [docs/AI-TRACEABILITY.md](docs/AI-TRACEABILITY.md) for the specific instances where engineer review caught a defect, redirected an approach, or made a scope call the AI couldn't make alone. A final engineering summary is still to be added — see `docs/` as it grows.
+This is an active, incremental build. See [docs/SCENARIOS.md](docs/SCENARIOS.md) for the greenfield/brownfield/ambiguous scenario walkthroughs (decomposition, execution, validation, with links to the actual merged PRs), [docs/AI-TRACEABILITY.md](docs/AI-TRACEABILITY.md) for the specific instances where engineer review caught a defect, redirected an approach, or made a scope call the AI couldn't make alone, and [docs/FINAL-SUMMARY.md](docs/FINAL-SUMMARY.md) for the wrap-up: what was built, how the assignment's requirements were addressed, and what would change with more time.
