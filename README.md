@@ -87,6 +87,8 @@ Run the test suite with:
 mvn test
 ```
 
+The `pom.xml` Surefire config sets `-Djdk.attach.allowAttachSelf=true`. This is required for Mockito to mock concrete classes (e.g. `ClickAnalyticsRecorder` in `UrlShortenerServiceImplTest`) on JDK 9+: Mockito 5's default "inline" mock maker instruments classes via a self-attached Java agent, and without this flag every test in that class fails identically at mock setup with `Could not modify all classes [class java.lang.Object, ...]` — not a per-test bug, since it fails before any test body runs. Mocking a plain interface (e.g. the repository mocks used elsewhere) doesn't need this, which is why only test classes mocking a concrete class are affected.
+
 Current coverage (`src/test/java`):
 - `UrlShortenerControllerTest` — endpoint-level request/response behavior, including the click-stats endpoint
 - `UrlShortenerServiceImplTest` — short-code generation and collision retry, duplicate handling (including a save-time race for both generated and custom codes), redirect/click-count logic, expiration enforcement, and stats aggregation
