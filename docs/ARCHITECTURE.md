@@ -91,6 +91,7 @@ Cross-cutting:
 - **Spring Security** — HTTP Basic Auth, one in-memory admin user, `ROLE_ADMIN`-gated management endpoints. `spring-security-test` provides `@WithMockUser`/`@WithAnonymousUser` for the `@WebMvcTest` slices.
 - **JUnit 5 / Spring Boot Test** — unit and slice tests per layer. Surefire runs with `-Dnet.bytebuddy.experimental=true` so `mvn test` still works on a JDK newer than the bundled Mockito/Byte Buddy officially supports (relevant for local dev on a bleeding-edge JDK; CI's pinned JDK 21 doesn't need it).
 - **GitHub Actions** (`.github/workflows/ci.yml`) — runs the test suite against a real MySQL service container on every push/PR to `main`. **Dependabot** (`.github/dependabot.yml`) — weekly PRs for outdated/vulnerable Maven and Actions dependencies.
+- **Maven Wrapper** (`mvnw` / `mvnw.cmd`, `.mvn/wrapper/maven-wrapper.properties`, `wrapperVersion=3.3.4`, `distributionUrl` pinned to Maven `3.9.16`) — no local Maven install needed; `./mvnw`/`mvnw.cmd` download and run the pinned version themselves. CI uses the same wrapper invocation, so local dev and CI are guaranteed to run the identical Maven version — closing off one more axis of the environment drift that caused real problems earlier in this project (see Key Design Decisions). `mvnw` needs its executable bit set in git (`100755`) to run on Linux/macOS without an explicit `chmod +x` first; this was initially committed as `100644` and had to be corrected.
 
 ## 3. Data Model
 

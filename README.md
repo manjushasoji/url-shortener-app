@@ -40,8 +40,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 ## Prerequisites
 
 - JDK 21
-- Maven 3.9+ (or use the wrapper if one is added)
 - A running MySQL 8 instance
+- No local Maven install needed — use the bundled wrapper (`./mvnw` on Linux/macOS, `mvnw.cmd` on Windows), which downloads and pins the exact Maven version (`3.9.16`) itself, matching what CI uses
 
 ## Setup
 
@@ -62,11 +62,11 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component design and contro
 4. **Build and run:**
 
    ```bash
-   mvn clean install
-   mvn spring-boot:run
+   ./mvnw clean install
+   ./mvnw spring-boot:run
    ```
 
-   The service starts on `http://localhost:8080`.
+   On Windows, use `mvnw.cmd` in place of `./mvnw`. The service starts on `http://localhost:8080`.
 
 5. **Explore the API:** Swagger UI is available at `http://localhost:8080/swagger-ui.html` (raw spec at `/v3/api-docs`).
 
@@ -106,10 +106,10 @@ Any path that doesn't match a route at all — a typo, a made-up endpoint, anywh
 Run the test suite with:
 
 ```bash
-mvn test
+./mvnw test
 ```
 
-`ClickAnalyticsRecorder` is an interface (`ClickAnalyticsRecorderImpl` holds the actual `@Async` logic) — originally split out to keep the concrete class out of `UrlShortenerServiceImplTest`'s mocks, on the theory that Mockito's bytecode-instrumentation path was the problem. That theory turned out to be incomplete: the actual failure some contributors will see running `mvn test` locally is `Could not modify all classes [class java.lang.Object, ...]` caused by Byte Buddy (Mockito's bytecode library) not yet recognizing a JDK newer than it was built against (`Java N is not supported by the current version of Byte Buddy`) — this affects mocking *anything*, interface or class, on such a JDK, since even mocking an interface generates a proxy class via Byte Buddy. The actual fix is the `-Dnet.bytebuddy.experimental=true` Surefire flag below; the interface split is kept anyway since it's still a reasonable design (matches the `UrlShortenerService`/`Impl` pattern already used here), but don't rely on "mock interfaces, not classes" as a real fix for this specific error.
+`ClickAnalyticsRecorder` is an interface (`ClickAnalyticsRecorderImpl` holds the actual `@Async` logic) — originally split out to keep the concrete class out of `UrlShortenerServiceImplTest`'s mocks, on the theory that Mockito's bytecode-instrumentation path was the problem. That theory turned out to be incomplete: the actual failure some contributors will see running `./mvnw test` locally is `Could not modify all classes [class java.lang.Object, ...]` caused by Byte Buddy (Mockito's bytecode library) not yet recognizing a JDK newer than it was built against (`Java N is not supported by the current version of Byte Buddy`) — this affects mocking *anything*, interface or class, on such a JDK, since even mocking an interface generates a proxy class via Byte Buddy. The actual fix is the `-Dnet.bytebuddy.experimental=true` Surefire flag below; the interface split is kept anyway since it's still a reasonable design (matches the `UrlShortenerService`/`Impl` pattern already used here), but don't rely on "mock interfaces, not classes" as a real fix for this specific error.
 
 The `pom.xml` Surefire config sets `-Dnet.bytebuddy.experimental=true`, letting Byte Buddy attempt best-effort support for a JDK it hasn't officially validated against. This only matters for local runs on a very new JDK — CI pins JDK 21 via `actions/setup-java` and is unaffected either way.
 
@@ -131,7 +131,7 @@ Current coverage (`src/test/java`):
 
 ## Continuous Integration
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `mvn test` on every push and pull request against `main`, against a real MySQL 8 service container (not mocked) — this exercises `UrlShortenerAppApplicationTests`' full Spring context load (`@SpringBootTest`), which needs a live datasource to even start, using the `DB_URL`/`DB_USERNAME`/`DB_PASSWORD` environment-variable overrides described in Setup. [`.github/dependabot.yml`](.github/dependabot.yml) opens weekly PRs for outdated/vulnerable Maven dependencies and GitHub Actions versions.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `./mvnw -B test` on every push and pull request against `main` (the wrapper, so CI uses the exact same Maven version as local dev), against a real MySQL 8 service container (not mocked) — this exercises `UrlShortenerAppApplicationTests`' full Spring context load (`@SpringBootTest`), which needs a live datasource to even start, using the `DB_URL`/`DB_USERNAME`/`DB_PASSWORD` environment-variable overrides described in Setup. [`.github/dependabot.yml`](.github/dependabot.yml) opens weekly PRs for outdated/vulnerable Maven dependencies and GitHub Actions versions.
 
 Not automated: static analysis / linting (e.g. Checkstyle, SpotBugs) and any deeper security scanning (e.g. dependency CVE scanning beyond what Dependabot alerts on) — see Known Limitations.
 
