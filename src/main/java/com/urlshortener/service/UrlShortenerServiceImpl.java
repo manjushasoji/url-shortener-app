@@ -8,14 +8,17 @@ import com.urlshortener.entity.ClickAnalytics;
 import com.urlshortener.entity.ShortUrl;
 import com.urlshortener.exception.DuplicateShortCodeException;
 import com.urlshortener.exception.ResourceNotFoundException;
+import com.urlshortener.exception.UrlExpiredException;
 import com.urlshortener.repository.ClickAnalyticsRepository;
 import com.urlshortener.repository.ShortUrlRepository;
 import com.urlshortener.util.UrlValidator;
 import com.urlshortener.util.UserAgentParser;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.security.SecureRandom;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Locale;
 
@@ -24,6 +27,7 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
 
     private static final String ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final int DEFAULT_CODE_LENGTH = 8;
+    private static final int MAX_GENERATION_ATTEMPTS = 5;
     private final ShortUrlRepository shortUrlRepository;
     private final ClickAnalyticsRepository clickAnalyticsRepository;
     private final SecureRandom random = new SecureRandom();
@@ -34,22 +38,51 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
     }
 
     @Override
-    @Transactional
     public ShortUrlResponse createShortUrl(CreateShortUrlRequest request) {
         String originalUrl = UrlValidator.normalizeAndValidate(request.originalUrl());
 
-        String shortCode = (request.customCode() == null || request.customCode().isBlank())
-            ? generateShortCode()
-            : normalizeCustomCode(request.customCode());
+        return (request.customCode() == null || request.customCode().isBlank())
+            ? createWithGeneratedCode(originalUrl, request.expiresAt())
+            : createWithCustomCode(originalUrl, normalizeCustomCode(request.customCode()), request.expiresAt());
+    }
 
+    /*
+     * Each save() attempt below is its own Spring Data-managed transaction (this
+     * method is intentionally not @Transactional), so catching a unique-constraint
+     * violation from one attempt doesn't poison a later retry. ShortUrl uses
+     * GenerationType.IDENTITY, so the INSERT (and any constraint violation) happens
+     * synchronously inside save(), not deferred to a later flush.
+     */
+    private ShortUrlResponse createWithCustomCode(String originalUrl, String shortCode, LocalDateTime expiresAt) {
         if (shortUrlRepository.existsByShortCode(shortCode)) {
             throw new DuplicateShortCodeException("Short code already exists: " + shortCode);
         }
 
-        ShortUrl shortUrl = new ShortUrl(shortCode, originalUrl);
-        ShortUrl saved = shortUrlRepository.save(shortUrl);
+        try {
+            return toResponse(shortUrlRepository.save(newShortUrl(shortCode, originalUrl, expiresAt)));
+        } catch (DataIntegrityViolationException e) {
+            throw new DuplicateShortCodeException("Short code already exists: " + shortCode);
+        }
+    }
 
-        return toResponse(saved);
+    private ShortUrlResponse createWithGeneratedCode(String originalUrl, LocalDateTime expiresAt) {
+        for (int attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+            try {
+                return toResponse(shortUrlRepository.save(newShortUrl(generateShortCode(), originalUrl, expiresAt)));
+            } catch (DataIntegrityViolationException e) {
+                if (attempt == MAX_GENERATION_ATTEMPTS) {
+                    throw new DuplicateShortCodeException(
+                        "Unable to generate a unique short code after " + MAX_GENERATION_ATTEMPTS + " attempts");
+                }
+            }
+        }
+        throw new IllegalStateException("Unreachable: loop above always returns or throws");
+    }
+
+    private ShortUrl newShortUrl(String shortCode, String originalUrl, LocalDateTime expiresAt) {
+        ShortUrl shortUrl = new ShortUrl(shortCode, originalUrl);
+        shortUrl.setExpiresAt(expiresAt);
+        return shortUrl;
     }
 
     @Override
@@ -73,6 +106,10 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
 
         if (!entity.isActive()) {
             throw new ResourceNotFoundException("Short URL is inactive: " + shortCode);
+        }
+
+        if (entity.getExpiresAt() != null && entity.getExpiresAt().isBefore(LocalDateTime.now())) {
+            throw new UrlExpiredException("Short URL has expired: " + shortCode);
         }
 
         entity.setClickCount((entity.getClickCount() == null ? 0L : entity.getClickCount()) + 1L);
@@ -132,7 +169,8 @@ public class UrlShortenerServiceImpl implements UrlShortenerService {
             entity.getOriginalUrl(),
             entity.getClickCount(),
             entity.isActive(),
-            entity.getCreatedAt()
+            entity.getCreatedAt(),
+            entity.getExpiresAt()
         );
     }
 }

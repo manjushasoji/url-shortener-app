@@ -48,7 +48,7 @@ Client
 ```
 
 Cross-cutting:
-- **`GlobalExceptionHandler`** (`@RestControllerAdvice`) — maps `ResourceNotFoundException`, `InvalidUrlException`, `DuplicateShortCodeException`, validation errors, and any uncaught exception to a structured `ApiError` (timestamp, status, error, message, path).
+- **`GlobalExceptionHandler`** (`@RestControllerAdvice`) — maps `ResourceNotFoundException`, `InvalidUrlException`, `DuplicateShortCodeException`, `UrlExpiredException`, validation errors, and any uncaught exception to a structured `ApiError` (timestamp, status, error, message, path).
 - **`OpenApiConfig`** — exposes Swagger UI / OpenAPI spec for interactive API exploration.
 
 ## 2. Tools
@@ -56,6 +56,7 @@ Cross-cutting:
 - **Spring Boot 3.4.1 / Java 21** — application framework and language baseline.
 - **Spring Data JPA + MySQL** — persistence; schema is managed via `hibernate.ddl-auto=update` (auto-generated from entity annotations, not migration-controlled).
 - **springdoc-openapi** — generates the OpenAPI spec and Swagger UI from controller annotations.
+- **Spring Boot Actuator** — exposes `/actuator/health` (with a DB connectivity check) and `/actuator/info` for operational visibility.
 - **JUnit 5 / Spring Boot Test** — unit and slice tests per layer.
 
 ## 3. Data Model
@@ -70,7 +71,7 @@ Cross-cutting:
 | `click_count` | BIGINT, default 0 | incremented on each successful redirect |
 | `active` | BOOLEAN, default true, indexed | exists on the model but nothing currently sets it to `false` — there is no deactivate endpoint |
 | `created_at` | TIMESTAMP | set via `@PrePersist` |
-| `expires_at` | TIMESTAMP, nullable | **present in the schema but never read** — see Known Limitations in the README |
+| `expires_at` | TIMESTAMP, nullable | optionally set from `CreateShortUrlRequest.expiresAt` (must be a future timestamp, validated via `@Future`); enforced on redirect — see Control Flow |
 
 `click_analytics` table (backing the `ClickAnalytics` entity) — one row per redirect:
 
@@ -85,18 +86,19 @@ Cross-cutting:
 ## 4. Control Flow
 
 **Create (`POST /api/v1/urls`):**
-1. Controller validates the request body (`@Valid` — `originalUrl` non-blank and matches an absolute-URL pattern).
+1. Controller validates the request body (`@Valid` — `originalUrl` non-blank and matches an absolute-URL pattern; `expiresAt`, if present, must be in the future).
 2. Service re-validates/normalizes the URL via `UrlValidator` (defense in depth against the same class of input, using `java.net.URI` to require a scheme + host of `http`/`https`).
-3. If no custom code was supplied, the service generates an 8-character random code from a 62-character alphabet (`SecureRandom`); if one was supplied, it's lowercased and checked against `[a-zA-Z0-9-]{3,20}`.
-4. The service checks `existsByShortCode`, then persists a new `ShortUrl`. *(Note: steps 3–4 are not atomic — see Known Limitations.)*
-5. Controller returns `201` with the persisted entity mapped to `ShortUrlResponse`.
+3. If a custom code was supplied, it's lowercased and checked against `[a-zA-Z0-9-]{3,20}`, then a fast `existsByShortCode` pre-check gives an immediate `409` for the common case. If none was supplied, the service generates an 8-character random code from a 62-character alphabet (`SecureRandom`) — no pre-check, since collision odds are negligible.
+4. The service attempts `save()`. Because `ShortUrl` uses `GenerationType.IDENTITY`, the INSERT (and any unique-constraint violation) happens synchronously inside `save()`, not on a later flush. A `DataIntegrityViolationException` here means a race: another request took the same code between the pre-check and the insert. For a custom code, this maps straight to `409`. For a generated code, the service retries with a fresh random code, up to 5 attempts, before giving up with `409`. *(This replaces the earlier check-then-act-only approach — see Key Design Decisions.)*
+5. Controller returns `201` with the persisted entity (including `expiresAt`, if set) mapped to `ShortUrlResponse`.
 
 **Redirect (`GET /api/v1/{shortCode}`):**
 1. Controller reads the `Referer` and `User-Agent` headers off the incoming request.
 2. Service looks up the entity by short code; `404` via `ResourceNotFoundException` if absent.
 3. If `active` is `false`, also `404`s (though nothing in the current code ever flips `active` to `false`).
-4. Click count is incremented and saved, and a `click_analytics` row is written in the same transaction (short_url_id, timestamp, referrer, and the browser name parsed from the raw `User-Agent` header via `UserAgentParser`). *(This makes the write path do more work per redirect — see Known Limitations regarding making this async.)*
-5. Controller issues a `302` redirect to `original_url`. *(Deliberately not `301` — see Key Design Decisions: a 301 would let browsers cache the redirect and skip the server on repeat clicks, undercounting `click_count`/`click_analytics`.)*
+4. If `expires_at` is set and is in the past, throws `UrlExpiredException` → `410 Gone`.
+5. Click count is incremented and saved, and a `click_analytics` row is written in the same transaction (short_url_id, timestamp, referrer, and the browser name parsed from the raw `User-Agent` header via `UserAgentParser`). *(This makes the write path do more work per redirect — see Known Limitations regarding making this async.)*
+6. Controller issues a `302` redirect to `original_url`. *(Deliberately not `301` — see Key Design Decisions: a 301 would let browsers cache the redirect and skip the server on repeat clicks, undercounting `click_count`/`click_analytics`.)*
 
 **Click stats (`GET /api/v1/urls/{shortCode}/stats`):**
 1. Service resolves the `ShortUrl` by code; `404` if absent.
@@ -107,6 +109,7 @@ Cross-cutting:
 
 - **Layered architecture (controller → service interface/impl → repository)** was chosen over a transaction-script or single-class design for testability: each layer is independently unit-testable, and the service is programmed against an interface (`UrlShortenerService`) so it can be mocked in controller tests.
 - **Random short codes over sequence-based/hash-based encoding** (e.g., base62 of the auto-increment ID): simpler to implement and avoids leaking row-count/creation-order information through the code, at the cost of needing a uniqueness check per creation rather than a guaranteed-unique derivation.
+- **Save-and-catch-and-retry instead of a stricter check-then-act for short-code creation**: the original implementation only checked `existsByShortCode` before saving, leaving a race window between two concurrent requests generating the same code. Rather than adding a DB-level advisory lock or `SELECT ... FOR UPDATE` (more complex, and unnecessary given how sparse the 62^8 code space is), `createShortUrl` now catches the unique-constraint violation from `save()` itself and retries with a new random code (generated codes) or fails clearly with `409` (custom codes, where retrying with a different code wouldn't honor what the caller asked for). This required removing `@Transactional` from `createShortUrl`: retrying inside one wrapping transaction would fail, because a caught persistence exception marks that transaction rollback-only in Spring/Hibernate — each `save()` attempt now runs in its own implicit transaction (Spring Data's repository methods are `@Transactional` themselves), so a failed attempt doesn't poison the next one.
 - **`ddl-auto=update` instead of a migration tool (Flyway/Liquibase)**: faster to iterate on for a prototype, but not something to carry into a shared/production environment — schema changes aren't versioned or reviewable as migrations.
 - **302 (temporary) redirect, not 301**: originally implemented as `301 Moved Permanently`, which is spec-cacheable by browsers — testing showed that a browser given a 301 once will resolve the short link from its own cache on every subsequent click, never re-hitting the server, so `click_count` and `click_analytics` silently stop incrementing for that visitor. Switched to `302 Found` so every click reaches the server and gets counted. Trade-off: the service loses the browser-caching benefit a 301 gave, and a redirect target can be changed later without stale-cache risk — both acceptable given click accuracy is the core feature.
 - **Event table (`click_analytics`) instead of only a counter**: a single `click_count` integer can't answer "clicks over time" or support a future "top links" view, so individual click events are recorded and aggregated on read. Trade-off: this is a write on every redirect (one INSERT plus the existing `click_count` UPDATE) instead of a single UPDATE — acceptable for a prototype, but the reason the README calls out making this write asynchronous as a near-term reliability follow-up.
@@ -122,7 +125,7 @@ Implementation proceeded layer-by-layer (entity → repository → service → c
 These are scope gaps, not implementation bugs — tracked in full in the README's Known Limitations:
 - A "top links" analytics view across all URLs (per-link stats are now implemented; cross-link aggregation is not)
 - Async click recording — analytics writes currently happen synchronously on the redirect path
-- Reliability concerns: rate limiting, caching, health checks, retry/circuit-breaking
-- Link lifecycle management: update, delete, deactivate, expiration enforcement
+- Reliability concerns: rate limiting, caching, retry/circuit-breaking (health checks are now implemented via Actuator)
+- Link lifecycle management: update, delete, deactivate (expiration is now implemented and enforced)
 - AuthN/AuthZ and multi-tenant ownership of links
-- Concurrency-safe short-code allocation (currently check-then-act, not atomic)
+- `/actuator/health` detail exposure has no access control — fine for local/prototype use, not for a shared deployment

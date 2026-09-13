@@ -27,6 +27,11 @@ public class GlobalExceptionHandler {
         return buildError(HttpStatus.CONFLICT, ex.getMessage(), request.getRequestURI());
     }
 
+    @ExceptionHandler(UrlExpiredException.class)
+    public ResponseEntity<ApiError> handleUrlExpired(UrlExpiredException ex, HttpServletRequest request) {
+        return buildError(HttpStatus.GONE, ex.getMessage(), request.getRequestURI());
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ApiError> handleValidation(MethodArgumentNotValidException ex, HttpServletRequest request) {
         String message = ex.getBindingResult().getFieldErrors().stream()

@@ -47,4 +47,15 @@ class GlobalExceptionHandlerTest {
         assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
         assertEquals("Short code already exists", response.getBody().message());
     }
+
+    @Test
+    void handleUrlExpired_shouldReturnGone() {
+        HttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/abc12345");
+        UrlExpiredException ex = new UrlExpiredException("Short URL has expired: abc12345");
+
+        ResponseEntity<ApiError> response = exceptionHandler.handleUrlExpired(ex, request);
+
+        assertEquals(HttpStatus.GONE, response.getStatusCode());
+        assertEquals("Short URL has expired: abc12345", response.getBody().message());
+    }
 }

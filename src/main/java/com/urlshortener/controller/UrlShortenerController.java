@@ -32,7 +32,7 @@ public class UrlShortenerController {
         this.urlShortenerService = urlShortenerService;
     }
 
-    @Operation(summary = "Create a short URL", description = "Creates a shortened URL for a valid absolute URL.")
+    @Operation(summary = "Create a short URL", description = "Creates a shortened URL for a valid absolute URL. Optionally accepts a future expiresAt timestamp after which the link stops redirecting.")
     @ApiResponses(value = {
         @ApiResponse(responseCode = "201", description = "Short URL created successfully"),
         @ApiResponse(responseCode = "400", description = "Invalid URL or payload"),
@@ -59,7 +59,8 @@ public class UrlShortenerController {
     @Operation(summary = "Redirect to original URL", description = "Redirects users to the original URL using the short code. Uses a 302 (not 301) so browsers re-request the redirect on every click instead of caching it, which would otherwise cause click counts to be undercounted.")
     @ApiResponses(value = {
         @ApiResponse(responseCode = "302", description = "Redirected successfully"),
-        @ApiResponse(responseCode = "404", description = "Short URL not found")
+        @ApiResponse(responseCode = "404", description = "Short URL not found or inactive"),
+        @ApiResponse(responseCode = "410", description = "Short URL has expired")
     })
     @GetMapping("/{shortCode}")
     public RedirectView redirect(
