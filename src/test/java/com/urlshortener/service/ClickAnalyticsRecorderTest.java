@@ -27,7 +27,7 @@ class ClickAnalyticsRecorderTest {
     private ClickAnalyticsRepository clickAnalyticsRepository;
 
     @InjectMocks
-    private ClickAnalyticsRecorder clickAnalyticsRecorder;
+    private ClickAnalyticsRecorderImpl clickAnalyticsRecorder;
 
     @Test
     void recordClick_shouldSaveParsedBrowserNameAndReferrer() {

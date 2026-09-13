@@ -64,19 +64,6 @@
                <groupId>org.springframework.boot</groupId>
                <artifactId>spring-boot-maven-plugin</artifactId>
            </plugin>
-           <plugin>
-               <groupId>org.apache.maven.plugins</groupId>
-               <artifactId>maven-surefire-plugin</artifactId>
-               <configuration>
-                   <!--
-                       Mockito 5's default "inline" mock maker instruments classes via a
-                       self-attached Java agent, which needs this system property on JDK 9+.
-                       Without it, mocking any concrete class (not just interfaces) fails
-                       with "Could not modify all classes [class java.lang.Object, ...]".
-                   -->
-                   <argLine>-Djdk.attach.allowAttachSelf=true</argLine>
-               </configuration>
-           </plugin>
        </plugins>
    </build>
 </project>
