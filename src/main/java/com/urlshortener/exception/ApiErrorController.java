@@ -1,6 +1,7 @@
 package com.urlshortener.exception;
 
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.boot.web.error.ErrorAttributeOptions;
 import org.springframework.boot.web.servlet.error.ErrorAttributes;
 import org.springframework.boot.web.servlet.error.ErrorController;
@@ -38,11 +39,28 @@ public class ApiErrorController implements ErrorController {
     }
 
     @RequestMapping("/error")
-    public ResponseEntity<ApiError> handleError(HttpServletRequest request) {
+    public ResponseEntity<ApiError> handleError(HttpServletRequest request, HttpServletResponse response) {
         WebRequest webRequest = new ServletWebRequest(request);
         Map<String, Object> attributes = errorAttributes.getErrorAttributes(webRequest, ErrorAttributeOptions.of(ErrorAttributeOptions.Include.MESSAGE));
 
-        HttpStatus status = HttpStatus.valueOf(((Number) attributes.getOrDefault("status", 500)).intValue());
+        /*
+         * Status comes from the response, not from parsing "status" out of the
+         * error-attributes map: for a Spring Security-triggered 401/403 (an
+         * AuthenticationEntryPoint/AccessDeniedHandler calling response.sendError()
+         * directly, not throwing through the normal exception-resolver chain),
+         * DefaultErrorAttributes' request-attribute-based status lookup isn't
+         * reliably populated by the time this forward lands here, and silently
+         * falls back to 500 - while "message" (sourced differently) comes through
+         * fine, producing a 500 body that says "Unauthorized". response.getStatus()
+         * is set synchronously by sendError()/setStatus() before the forward
+         * happens, so it's the reliable source regardless of which mechanism
+         * (framework exception vs. security rejection) triggered the error.
+         */
+        HttpStatus status = HttpStatus.resolve(response.getStatus());
+        if (status == null) {
+            status = HttpStatus.INTERNAL_SERVER_ERROR;
+        }
+
         String path = String.valueOf(attributes.getOrDefault("path", request.getRequestURI()));
         String message = String.valueOf(attributes.getOrDefault("message", status.getReasonPhrase()));
 
