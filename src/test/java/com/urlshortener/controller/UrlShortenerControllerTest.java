@@ -73,7 +73,7 @@ class UrlShortenerControllerTest {
     }
 
     @Test
-    void redirect_shouldReturnPermanentRedirect() throws Exception {
+    void redirect_shouldReturnNonCacheableRedirect() throws Exception {
         UrlShortenerController controller = new UrlShortenerController(urlShortenerService);
         MockHttpServletRequest incomingRequest = new MockHttpServletRequest();
         incomingRequest.addHeader("Referer", "https://ref.example");
@@ -88,7 +88,7 @@ class UrlShortenerControllerTest {
         view.render(Map.of(), incomingRequest, response);
 
         assertEquals("https://example.org", response.getHeader("Location"));
-        assertEquals(HttpServletResponse.SC_MOVED_PERMANENTLY, response.getStatus());
+        assertEquals(HttpServletResponse.SC_FOUND, response.getStatus());
     }
 
     @Test
