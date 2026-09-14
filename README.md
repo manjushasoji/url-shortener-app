@@ -1,5 +1,7 @@
 # URL Shortener App
 
+[![CI](https://github.com/manjushasoji/url-shortener-app/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/manjushasoji/url-shortener-app/actions/workflows/ci.yml)
+
 A REST service for creating, resolving, and redirecting shortened URLs, built with Spring Boot 3 and MySQL.
 
 ## Features
